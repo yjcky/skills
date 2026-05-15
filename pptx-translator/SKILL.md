@@ -167,3 +167,4 @@ python scripts/translate_pptx.py deck-cn.pptx -s zh -t en -e cerebras --style pr
 python scripts/translate_pptx.py marketing.pptx -s en -t zh \
   -e bedrock --style "friendly and engaging" --glossary brand-terms.json
 ```
+# 这是测试项目同步的一条信息
