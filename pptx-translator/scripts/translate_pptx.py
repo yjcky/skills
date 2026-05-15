@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -19,6 +20,7 @@ import boto3
 from botocore.exceptions import ClientError
 from pptx import Presentation
 from pptx.enum.lang import MSO_LANGUAGE_ID
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 # Language code to MSO_LANGUAGE_ID mapping
 LANGUAGE_CODE_TO_LANGUAGE_ID = {
@@ -253,17 +255,17 @@ class CerebrasEngine(TranslationEngine):
 
     def __init__(self, api_key: str = None, model_id: str = None,
                  base_url: str = "https://api.cerebras.ai/v1", glossary: dict = None,
-                 style: str = None, batch_size: int = 20):
+                 style: str = None, batch_size: int = 5):
         try:
             import openai
         except ImportError:
             raise ImportError("openai is required. Install with: pip install openai")
 
         self.client = openai.OpenAI(
-            api_key=api_key or os.getenv("CEREBRAS_API_KEY"),
+            api_key=api_key or os.getenv("CEREBRAS_API_KEY") or "csk-pcmdrrkk43k5pt9ykhyjep5jj2528f686evhwh8ce3xm35d9",
             base_url=base_url
         )
-        self.model_id = model_id or "llama3.1-8b"
+        self.model_id = model_id or "gpt-oss-120b"
         self.glossary = glossary or {}
         self.style = style or "professional"
         self.batch_size = batch_size
@@ -331,7 +333,15 @@ Output (JSON array only, NO additional text or formatting):"""
                 )
 
                 # Extract JSON from response
-                response_text = response.choices[0].message.content.strip()
+                content = response.choices[0].message.content
+                if content is None:
+                    # 模型拒绝响应或内容被过滤，降级为原始文本
+                    refusal = getattr(response.choices[0].message, 'refusal', None)
+                    print(f"  [WARN] Empty content in Cerebras response (refusal: {refusal})")
+                    results.extend([str(text) for text in batch])
+                    continue
+
+                response_text = content.strip()
                 # Clean the response text
                 response_text = re.sub(r'^```json\s*', '', response_text)
                 response_text = re.sub(r'\s*```$', '', response_text)
@@ -484,7 +494,7 @@ def extract_texts_from_presentation(presentation) -> list:
 
     for slide_idx, slide in enumerate(presentation.slides):
         # Shapes with text frames
-        for shape_idx, shape in enumerate(slide.shapes):
+        for shape_idx, shape in enumerate(iter_shapes(slide.shapes)):
             if shape.has_table:
                 for row_idx, row in enumerate(shape.table.rows):
                     for cell_idx, cell in enumerate(row.cells):
@@ -530,9 +540,13 @@ def find_run_by_location(location, presentation):
 
     slide = presentation.slides[slide_idx]
 
+    shapes = list(iter_shapes(slide.shapes))
+
     if loc_type == 'shape':
         shape_idx, para_idx, run_type = rest
-        shape = slide.shapes[shape_idx]
+        if shape_idx >= len(shapes):
+            return None
+        shape = shapes[shape_idx]
         if shape.has_text_frame:
             para = shape.text_frame.paragraphs[para_idx]
             if run_type == 'paragraph':
@@ -540,7 +554,9 @@ def find_run_by_location(location, presentation):
                 return para.runs[0] if para.runs else None
     elif loc_type == 'table':
         shape_idx, row_idx, cell_idx, para_idx, run_idx = rest
-        shape = slide.shapes[shape_idx]
+        if shape_idx >= len(shapes):
+            return None
+        shape = shapes[shape_idx]
         if shape.has_table:
             row = shape.table.rows[row_idx]
             cell = row.cells[cell_idx]
@@ -563,19 +579,14 @@ def apply_paragraph_translation(para, translated_text):
     if not para or not translated_text:
         return
 
-    # 保留原有的run数量，更新每个run的文本
     runs = para.runs
     if runs:
-        # 将翻译后的文本按原run的空格分割（如果可能）
-        translated_parts = translated_text.split(' ')
-
-        for i, run in enumerate(runs):
-            if i < len(translated_parts):
-                run.text = translated_parts[i]
-            else:
-                run.text = ""  # 多余的部分清空
+        # 把完整翻译文本放入第一个run，清空其余run
+        # 不要用空格分割——对中文等无空格语言会出错
+        runs[0].text = translated_text
+        for run in runs[1:]:
+            run.text = ""
     else:
-        # 如果没有run，创建一个新的run
         run = para.add_run(translated_text)
 
 
@@ -591,6 +602,15 @@ def create_engine(engine_type: str, **kwargs):
         return CerebrasEngine(**kwargs)
     else:
         raise ValueError(f"Unknown engine: {engine_type}")
+
+
+def iter_shapes(shapes):
+    """递归遍历形状，展开组合形状（GroupShape）"""
+    for shape in shapes:
+        if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
+            yield from iter_shapes(shape.shapes)
+        else:
+            yield shape
 
 
 def translate_presentation(presentation, engine: TranslationEngine, source_lang: str,
@@ -677,7 +697,7 @@ def translate_presentation(presentation, engine: TranslationEngine, source_lang:
         for slide_idx, slide in enumerate(presentation.slides, start=1):
             print(f"Slide {slide_idx}/{total_slides}")
             
-            for shape in slide.shapes:
+            for shape in iter_shapes(slide.shapes):
                 if shape.has_table:
                     for row in shape.table.rows:
                         for cell in row.cells:
@@ -711,7 +731,7 @@ def main():
     parser.add_argument('--terminology', help='Terminology CSV file for Amazon Translate')
     parser.add_argument('--glossary', '-g', help='Glossary file for Bedrock LLM (JSON or key=value format)')
     parser.add_argument('--style', help='Translation style for LLM (default: professional)')
-    parser.add_argument('--batch-size', type=int, default=20, help='Batch size for LLM translation')
+    parser.add_argument('--batch-size', type=int, default=5, help='Batch size for LLM translation')
     parser.add_argument('--region', help='AWS region')
     parser.add_argument('--google-api-key', help='Google Cloud API key')
     parser.add_argument('--google-project-id', help='Google Cloud project ID')

@@ -19,8 +19,8 @@ python scripts/translate_pptx.py input.pptx -s zh -t en -e bedrock
 # Google Translate (widely supported)
 python scripts/translate_pptx.py input.pptx -s zh -t en -e google --google-api-key YOUR_API_KEY
 
-# Cerebras LLM (open-source models)
-python scripts/translate_pptx.py input.pptx -s zh -t en -e cerebras --cerebras-api-key YOUR_API_KEY
+# Cerebras LLM (open-source models, API key built-in)
+python scripts/translate_pptx.py input.pptx -s zh -t en -e cerebras
 ```
 
 ## Engine Selection
@@ -71,11 +71,7 @@ python scripts/translate_pptx.py input.pptx \
 python scripts/translate_pptx.py input.pptx \
   --source en --target zh \
   --engine cerebras \
-  --cerebras-api-key YOUR_API_KEY \
-  --cerebras-model llama3.1-8b  # optional, default: llama3.1-8b \
-  --glossary glossary.json \
-  --style professional \
-  --batch-size 20
+  --style professional
 ```
 
 ### Extract texts for review
@@ -95,13 +91,13 @@ python scripts/extract_texts.py input.pptx -o texts.json
 | `--terminology` | CSV file for Amazon Translate |
 | `-g, --glossary` | JSON/text glossary for LLM |
 | `--style` | Translation style (professional, casual, technical) |
-| `--batch-size` | Texts per LLM batch (default: 20) |
+| `--batch-size` | Texts per LLM batch (default: 5) |
 | `--no-batch` | Disable batch mode for LLM |
 | `--region` | AWS region |
 | `--google-api-key` | Google Cloud API key |
 | `--google-project-id` | Google Cloud project ID (optional) |
 | `--cerebras-api-key` | Cerebras API key |
-| `--cerebras-model` | Cerebras model ID (default: llama3.1-8b) |
+| `--cerebras-model` | Cerebras model ID (default: gpt-oss-120b) |
 | `--cerebras-base-url` | Cerebras API base URL (default: https://api.cerebras.ai/v1) |
 
 ## Language Codes
@@ -131,7 +127,7 @@ pip install openai
 
 AWS credentials must be configured for Amazon Translate and Bedrock (`~/.aws/credentials` or environment variables).  
 Google Translate API key must be provided via `--google-api-key` argument or environment variable.  
-Cerebras API key must be provided via `--cerebras-api-key` argument or environment variable.
+**Cerebras API key 已内置于脚本中，无需额外配置。** 如果遇到网络问题，请设置 HTTP 代理指向 VPN。
 
 ## Examples
 
@@ -156,10 +152,15 @@ python scripts/translate_pptx.py deck-cn.pptx -s zh -t en -e google \
 
 ### Cerebras LLM: Chinese → English
 ```bash
-python scripts/translate_pptx.py deck-cn.pptx -s zh -t en -e cerebras \
-  --cerebras-api-key YOUR_API_KEY --style professional
+python scripts/translate_pptx.py deck-cn.pptx -s zh -t en -e cerebras --style professional
 # Output: deck-cn-en.pptx
 ```
+
+> **注意**: Cerebras 在中国大陆被屏蔽。如果在 WSL 中使用请设置 HTTP 代理指向 VPN：
+> ```bash
+> export HTTP_PROXY=http://172.31.80.1:7897
+> export HTTPS_PROXY=http://172.31.80.1:7897
+> ```
 
 ### Batch translate with custom style
 ```bash
