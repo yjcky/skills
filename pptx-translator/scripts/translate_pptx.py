@@ -84,6 +84,79 @@ LANGUAGE_NAMES = {
 }
 
 
+def post_process_translation(text: str, target_lang: str) -> str:
+    """Clean up common translation artifacts when translating to English."""
+    if target_lang != 'en':
+        return text
+
+    # CJK punctuation → English equivalents
+    punctuation_map = {
+        '，': ',',   # ，
+        '。': '.',   # 。
+        '；': ';',   # ；
+        '：': ':',   # ：
+        '？': '?',   # ？
+        '！': '!',   # ！
+        '（': '(',   # （
+        '）': ')',   # ）
+        '“': '"',   # "
+        '”': '"',   # "
+        '‘': "'",   # '
+        '’': "'",   # '
+        '～': '~',   # ～
+        '…': '...', # …
+        '、': ',',   # 、
+        '《': '<',   # 《
+        '》': '>',   # 》
+        '【': '[',   # 【
+        '】': ']',   # 】
+    }
+    for cjk, eng in punctuation_map.items():
+        text = text.replace(cjk, eng)
+
+    # Fix concatenation of CJK char + Latin word
+    text = re.sub(r'([一-鿿㐀-䶿豈-﫿])([A-Za-z])', r'\1 \2', text)
+    text = re.sub(r'([A-Za-z])([一-鿿㐀-䶿豈-﫿])', r'\1 \2', text)
+
+    # Fix Latin word concatenation: camelCase / word boundary splitting
+    # "cooperateLTAEstablish" → "cooperate LTA Establish"
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    # "SUTPCWill" → "SUTPC Will"  (all-caps acronym followed by capitalized word)
+    text = re.sub(r'([A-Z]{2,})([A-Z][a-z])', r'\1 \2', text)
+
+    # Fix "SUTPCrequirements" → "SUTPC requirements" (all-caps acronym + lowercase word)
+    text = re.sub(r'([A-Z]{2,})([a-z])', r'\1 \2', text)
+
+    # Fix common English function-word concatenation (LLM output artifact from CJK→EN)
+    # Only at start/end of string to minimize false positives
+    function_words = [
+        'without', 'through', 'between', 'during', 'before', 'after',
+        'about', 'above', 'across', 'against', 'along', 'among', 'around',
+        'from', 'with', 'over', 'into', 'onto', 'upon', 'than', 'that', 'this',
+        'will', 'have', 'been', 'being', 'were', 'when', 'what', 'where', 'which',
+        'while', 'their', 'there', 'these', 'those', 'other', 'every', 'first',
+        'must', 'just', 'also', 'such', 'only', 'then', 'them', 'very', 'much',
+        'due', 'and', 'for', 'the', 'not', 'but', 'can', 'may', 'has', 'had',
+        'all', 'any', 'its', 'his', 'her', 'our', 'was', 'are', 'one', 'two',
+        'of', 'to', 'in', 'on', 'at', 'by', 'or', 'an', 'is', 'it', 'be', 'as',
+        'we', 'he', 'so', 'no', 'if', 'do', 'go', 'my', 'me', 'us', 'up',
+    ]
+    function_words.sort(key=len, reverse=True)
+    fw_pattern = '|'.join(function_words)
+    # a) function word at start immediately followed by 3+ lowercase letters
+    text = re.sub(rf'^({fw_pattern})([a-z]{{3,}})', r'\1 \2', text)
+    # b) function word at end immediately preceded by a letter
+    text = re.sub(rf'([a-z])({fw_pattern})$', r'\1 \2', text)
+
+    # Fix missing space after punctuation when followed by a letter/digit
+    text = re.sub(r'([.,;:!?])([A-Za-z0-9])', r'\1 \2', text)
+
+    # Remove spaces before English punctuation (common LLM artifact)
+    text = re.sub(r'\s+([.,;:!?)])', r'\1', text)
+
+    return text.strip()
+
+
 class TranslationEngine:
     """Base class for translation engines."""
     
@@ -139,17 +212,42 @@ class BedrockLLMEngine(TranslationEngine):
         
         texts_json = json.dumps(texts, ensure_ascii=False)
         
+        # Build CJK-specific rules when translating from Chinese/Japanese/Korean to English
+        cjk_rules = ""
+        if source_lang in ('zh', 'zh-TW', 'ja', 'ko') and target_lang == 'en':
+            cjk_rules = """
+5. Convert ALL Chinese/Japanese/Korean punctuation to English equivalents:
+   - ，→ ,  。→ .  ；→ ;  ：→ :  ？→ ?  ！→ !
+   - （→ (  ）→ )  “ → "  ” → "  ‘ → '  ’ → '
+   - ～→ ~  …→ ...  、→ ,
+6. CRITICAL — Word spacing: The source text has NO spaces (Chinese doesn't use them). Your English output MUST have proper spaces between EVERY word. Examples:
+   - "SUTPC将配合LTA建立" → "SUTPC will cooperate with LTA to establish" (NOT "SUTPCwill cooperateLTAEstablish")
+   - "SUTPC会配合" → "SUTPC will cooperate" (NOT "SUTPCWill cooperate" or "SUTPCwill cooperate")
+   - Treat embedded Latin acronyms (SUTPC, LTA, CI/CD, VPN, AD, WOG, SEED) as separate words requiring surrounding spaces
+7. Follow English capitalization rules strictly:
+   - Only capitalize proper nouns, acronyms, and the first word of a sentence
+   - Do NOT capitalize common words in the middle of a sentence (will → will, NOT Will)
+"""
+        else:
+            cjk_rules = """
+5. Preserve any formatting markers, placeholders, or special characters
+"""
+
         return f"""Translate the following texts from {source_name} to {target_name}.
 
 Style: {self.style}{glossary_section}
 
 Rules:
-1. Preserve any formatting markers, placeholders, or special characters
-2. Maintain consistent terminology across all texts
-3. Keep translations natural and fluent in the target language
-4. Return ONLY a JSON array of translated strings in the same order
+1. Maintain consistent terminology across all texts
+2. Keep translations natural and fluent in the target language
+3. Return ONLY a JSON array of translated strings in the same order
+4. Do NOT include any explanatory text, keys, values, or metadata{cjk_rules}
+6. Do NOT wrap translations in JSON key-value format
+7. Do NOT create dictionaries like key-value pairs
+8. Return ONLY the plain translated text strings
+9. Ensure the output is clean, valid JSON that can be parsed by json.loads()
 
-Input texts:
+Texts to translate:
 {texts_json}
 
 Output (JSON array only):"""
@@ -282,16 +380,36 @@ class CerebrasEngine(TranslationEngine):
 
         texts_json = json.dumps(texts, ensure_ascii=False)
 
+        # Build CJK-specific rules when translating from Chinese/Japanese/Korean to English
+        cjk_rules = ""
+        if source_lang in ('zh', 'zh-TW', 'ja', 'ko') and target_lang == 'en':
+            cjk_rules = """
+5. Convert ALL Chinese/Japanese/Korean punctuation to English equivalents:
+   - ，→ ,  。→ .  ；→ ;  ：→ :  ？→ ?  ！→ !
+   - （→ (  ）→ )  “ → "  ” → "  ‘ → '  ’ → '
+   - ～→ ~  …→ ...  、→ ,
+6. CRITICAL — Word spacing: The source text has NO spaces (Chinese doesn't use them). Your English output MUST have proper spaces between EVERY word. Examples:
+   - "SUTPC将配合LTA建立" → "SUTPC will cooperate with LTA to establish" (NOT "SUTPCwill cooperateLTAEstablish")
+   - "SUTPC会配合" → "SUTPC will cooperate" (NOT "SUTPCWill cooperate" or "SUTPCwill cooperate")
+   - Treat embedded Latin acronyms (SUTPC, LTA, CI/CD, VPN, AD, WOG, SEED) as separate words requiring surrounding spaces
+7. Follow English capitalization rules strictly:
+   - Only capitalize proper nouns, acronyms, and the first word of a sentence
+   - Do NOT capitalize common words in the middle of a sentence (will → will, NOT Will)
+"""
+        else:
+            cjk_rules = """
+5. Preserve any formatting markers, placeholders, or special characters
+"""
+
         return f"""Translate the following texts from {source_name} to {target_name}.
 
 Style: {self.style}{glossary_section}
 
 Rules:
-1. Preserve any formatting markers, placeholders, or special characters
-2. Maintain consistent terminology across all texts
-3. Keep translations natural and fluent in the target language
-4. Return ONLY a valid JSON array of translated strings in the same order
-5. Do NOT include any explanatory text, keys, values, or metadata
+1. Maintain consistent terminology across all texts
+2. Keep translations natural and fluent in the target language
+3. Return ONLY a valid JSON array of translated strings in the same order
+4. Do NOT include any explanatory text, keys, values, or metadata{cjk_rules}
 6. Do NOT wrap translations in JSON key-value format
 7. Do NOT create dictionaries like key-value pairs
 8. Return ONLY the plain translated text strings
@@ -328,7 +446,7 @@ Output (JSON array only, NO additional text or formatting):"""
                     model=self.model_id,
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=max(2000, len(batch) * 100),
-                    temperature=0.3,
+                    temperature=0.1,
                     n=1
                 )
 
@@ -499,13 +617,15 @@ def extract_texts_from_presentation(presentation) -> list:
                 for row_idx, row in enumerate(shape.table.rows):
                     for cell_idx, cell in enumerate(row.cells):
                         for para_idx, para in enumerate(cell.text_frame.paragraphs):
-                            for run_idx, run in enumerate(para.runs):
-                                if run.text.strip():
-                                    texts.append({
-                                        'text': run.text,
-                                        'location': ('table', slide_idx, shape_idx, row_idx, cell_idx, para_idx, run_idx),
-                                        'original_text': run.text
-                                    })
+                            # Merge all runs in the paragraph for full context (like shapes)
+                            para_text = ''.join(run.text for run in para.runs if run.text.strip())
+                            if para_text.strip():
+                                texts.append({
+                                    'text': para_text,
+                                    'location': ('table', slide_idx, shape_idx, row_idx, cell_idx, para_idx, 'paragraph'),
+                                    'original_text': para_text,
+                                    'paragraph': para
+                                })
             elif shape.has_text_frame:
                 for para_idx, para in enumerate(shape.text_frame.paragraphs):
                     # 按段落合并所有runs的文本
@@ -665,6 +785,9 @@ def translate_presentation(presentation, engine: TranslationEngine, source_lang:
             else:
                 translated_text = str(translated)
 
+            # Post-process: fix CJK punctuation, spacing, capitalization
+            translated_text = post_process_translation(translated_text, target_lang)
+
             # 检查是否是段落级别的翻译
             if 'paragraph' in item:
                 # 使用段落级别的翻译
@@ -714,7 +837,8 @@ def translate_text_frame(text_frame, engine: TranslationEngine, source_lang: str
     for paragraph in text_frame.paragraphs:
         for run in paragraph.runs:
             if run.text.strip():
-                run.text = engine.translate(run.text, source_lang, target_lang)
+                translated = engine.translate(run.text, source_lang, target_lang)
+                run.text = post_process_translation(translated, target_lang)
 
 
 def main():

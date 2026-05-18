@@ -51,7 +51,10 @@
       "Skill(update-config:*)",
       "Bash(ls /home/yyy/.claude/skills/)",
       "Read(//home/yyy/.claude/**)",
-      "Bash(conda env *)"
+      "Bash(conda env *)",
+      "Bash(sudo apt update)",
+      "Bash(sudo apt install gh -y)",
+      "Bash(gh --version)"
     ],
     "additionalDirectories": [
       "E:\\download\\work\\translate",
