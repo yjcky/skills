@@ -480,148 +480,77 @@ Example output format:
 Output (JSON array only, NO additional text or formatting):"""
 
     def translate_batch(self, texts: list, source_lang: str, target_lang: str) -> list:
-        """Batch translation using Cerebras API."""
+        """Translate a single batch of texts using Cerebras API, with retry on rate limit."""
         if not texts:
             return []
 
-        # Split into batches
-        batches = [texts[i:i + self.batch_size] for i in range(0, len(texts), self.batch_size)]
+        prompt = self._build_prompt(texts, source_lang, target_lang)
+        import time
 
-        results = []
-        failed_batches = 0
-
-        for batch_idx, batch in enumerate(batches):
-            if not batch:
-                continue
-
-            print(f"  Translating batch {batch_idx + 1}/{len(batches)} with {len(batch)} texts...")
-
-            prompt = self._build_prompt(batch, source_lang, target_lang)
-
+        max_retries = 3
+        for attempt in range(max_retries + 1):
             try:
                 response = self.client.chat.completions.create(
                     model=self.model_id,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=max(2000, len(batch) * 100),
+                    max_tokens=max(2000, len(texts) * 100),
                     temperature=0.1,
                     n=1
                 )
 
-                # Extract JSON from response
                 content = response.choices[0].message.content
                 if content is None:
-                    # 模型拒绝响应或内容被过滤，降级为原始文本
                     refusal = getattr(response.choices[0].message, 'refusal', None)
                     print(f"  [WARN] Empty content in Cerebras response (refusal: {refusal})")
-                    results.extend([str(text) for text in batch])
-                    continue
+                    return [str(text) for text in texts]
 
                 response_text = content.strip()
-                # Clean the response text
                 response_text = re.sub(r'^```json\s*', '', response_text)
                 response_text = re.sub(r'\s*```$', '', response_text)
                 response_text = response_text.strip()
 
-                # Try to parse as JSON first, with better error handling
+                # Try to parse as JSON
                 try:
-                    # First try to parse the entire response as JSON
                     translated_batch = json.loads(response_text)
                     if not isinstance(translated_batch, list):
                         translated_batch = [translated_batch]
-
-                    # Ensure all elements are strings
-                    for item in translated_batch:
-                        if isinstance(item, str):
-                            results.append(item)
-                        else:
-                            results.append(str(item))
-
-                    # If we successfully parsed, continue to next batch
-                    continue
-
+                    return [str(item) for item in translated_batch]
                 except json.JSONDecodeError:
-                    print(f"  [WARN] JSON parsing failed, trying fallback...")
                     pass
 
-                # If JSON parsing failed, try to extract array manually
+                # Try to extract array manually
                 json_match = re.search(r'\[(.*?)\]', response_text, re.DOTALL)
                 if json_match:
                     try:
                         translated_batch = json.loads(f"[{json_match.group(1)}]")
                         if not isinstance(translated_batch, list):
                             translated_batch = [translated_batch]
-
-                        # Ensure all elements are strings
-                        for item in translated_batch:
-                            if isinstance(item, str):
-                                results.append(item)
-                            else:
-                                results.append(str(item))
+                        return [str(item) for item in translated_batch]
                     except json.JSONDecodeError:
-                        # If that still fails, try to extract individual strings
-                        translated_batch = []
-                        # Extract quoted strings using regex
-                        string_matches = re.findall(r'"([^"]*)"', response_text)
-                        if string_matches:
-                            translated_batch = string_matches
-                        else:
-                            # Fallback: split by lines and take non-empty lines
-                            for line in response_text.split('\n'):
-                                line = line.strip()
-                                if line and line not in ['[', ']']:
-                                    translated_batch.append(line)
+                        pass
 
-                        # Ensure all elements are strings
-                        for item in translated_batch:
-                            if isinstance(item, str):
-                                results.append(item)
-                            else:
-                                results.append(str(item))
-                else:
-                    # If no array found, extract individual strings
-                    string_matches = re.findall(r'"([^"]*)"', response_text)
-                    if string_matches:
-                        translated_batch = string_matches
-                    else:
-                        # Fallback: split by lines and take non-empty lines
-                        translated_batch = []
-                        for line in response_text.split('\n'):
-                            line = line.strip()
-                            if line and line not in ['[', ']']:
-                                translated_batch.append(line)
+                # Extract quoted strings as last resort
+                string_matches = re.findall(r'"([^"]*)"', response_text)
+                if string_matches:
+                    return string_matches
 
-                    # Ensure all elements are strings
-                    for item in translated_batch:
-                        if isinstance(item, str):
-                            results.append(item)
-                        else:
-                            results.append(str(item))
+                # Ultimate fallback: split by lines
+                lines = [line.strip() for line in response_text.split('\n')
+                         if line.strip() and line.strip() not in ('[', ']')]
+                return lines if lines else [str(text) for text in texts]
 
             except Exception as e:
-                failed_batches += 1
-                print(f"  [WARN] Cerebras error in batch {batch_idx + 1}: {e}")
-                # Return original texts for this batch, maintaining exact count
-                results.extend([str(text) for text in batch])
+                err = str(e)
+                is_rate_limit = '429' in err or 'rate' in err.lower() or 'too_many_requests' in err.lower()
+                if is_rate_limit and attempt < max_retries:
+                    delay = (attempt + 1) * 3  # 3s, 6s, 9s backoff
+                    print(f"  [RETRY] Rate limited, waiting {delay}s (attempt {attempt + 1}/{max_retries})...")
+                    time.sleep(delay)
+                    continue
+                print(f"  [WARN] Cerebras error: {e}")
+                return [str(text) for text in texts]
 
-        # If ALL batches failed, abort instead of writing an untranslated file
-        if failed_batches > 0 and failed_batches == len(batches):
-            raise RuntimeError(
-                f"All {failed_batches} translation batches failed. "
-                "Check network connectivity to Cerebras API. "
-                "If you are behind a proxy, set HTTPS_PROXY environment variable."
-            )
-
-        # Fill results with original texts for any failed batches
-        while len(results) < len(texts):
-            original_text = texts[len(results)]
-            results.append(str(original_text) if original_text else "")
-
-        # Trim results if we have too many (shouldn't happen, but safety check)
-        if len(results) > len(texts):
-            print(f"  [WARN] Translation count mismatch: {len(texts)} original vs {len(results)} translated")
-            results = results[:len(texts)]
-
-        return results
+        return [str(text) for text in texts]
 
     def translate(self, text: str, source_lang: str, target_lang: str) -> str:
         """Single text translation (uses translate_batch internally)."""
@@ -813,18 +742,50 @@ def translate_presentation(presentation, engine: TranslationEngine, source_lang:
             return
         
         print(f"Found {len(text_items)} text segments")
-        
-        # Translate in batches
+
+        # Build batches for concurrent translation
         texts = [item['text'] for item in text_items]
         batch_size = engine.batch_size
-        translated_texts = []
-        
+
+        batches = []
         for i in range(0, len(texts), batch_size):
-            batch = texts[i:i + batch_size]
-            print(f"Translating batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}...")
-            translated_batch = engine.translate_batch(batch, source_lang, target_lang)
-            translated_texts.extend(translated_batch)
-        
+            batches.append(texts[i:i + batch_size])
+        batch_count = len(batches)
+
+        import concurrent.futures
+        translated_texts = []
+
+        max_workers = min(3, batch_count)
+        print(f"Translating {batch_count} batches with {max_workers} concurrent workers...")
+
+        results_by_index = {}
+        failed_count = 0
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_idx = {}
+            for idx, batch in enumerate(batches):
+                future = executor.submit(engine.translate_batch, batch, source_lang, target_lang)
+                future_to_idx[future] = idx
+
+            for future in concurrent.futures.as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    results_by_index[idx] = future.result()
+                except Exception as e:
+                    failed_count += 1
+                    print(f"  [ERROR] Batch {idx + 1}/{batch_count} failed: {e}")
+                    results_by_index[idx] = [str(t) for t in batches[idx]]
+
+            for i in range(batch_count):
+                batch_result = results_by_index.get(i, [str(t) for t in batches[i]])
+                translated_texts.extend(batch_result)
+
+        if batch_count > 0 and failed_count == batch_count:
+            raise RuntimeError(
+                f"All {batch_count} translation batches failed. "
+                "Check network connectivity to Cerebras API."
+            )
+
         # Apply translations
         print("Applying translations...")
         # Validate that we have the same number of translations as original texts
@@ -931,16 +892,45 @@ def main():
     parser.add_argument('--no-batch', action='store_true', help='Disable batch mode for LLM')
     
     args = parser.parse_args()
-    
-    # Validate input file
-    input_path = Path(args.input_file)
+
+    # Fix Windows stdio encoding for Chinese character display
+    if sys.platform == 'win32':
+        for stream in [sys.stdout, sys.stderr]:
+            if hasattr(stream, 'reconfigure'):
+                try:
+                    stream.reconfigure(encoding='utf-8', errors='replace')
+                except Exception:
+                    pass
+
+    # Resolve input path with encoding-safe handling.
+    # - expanduser: handle ~ in paths
+    # - resolve: get absolute canonical path (handles Chinese chars via Unicode API)
+    # - normalize whitespace: \xa0 (non-breaking space) often corrupts paths
+    #   passed through MSYS2/Git Bash on Chinese Windows
+    def _safe_resolve(path_str):
+        p = Path(path_str).expanduser()
+        if p.exists():
+            return p.resolve()
+        # Recovery: try substituting special whitespace with regular spaces
+        fixed = path_str
+        for ws in ('\xa0', ' ', ' ', ' ', ' ', ' ',
+                   ' ', ' ', ' ', ' ', ' ', ' ',
+                   ' ', ' ', '　'):
+            fixed = fixed.replace(ws, ' ')
+        fixed_p = Path(fixed).expanduser()
+        if fixed_p.exists():
+            return fixed_p.resolve()
+        return p.resolve()  # return original (for error message display)
+
+    input_path = _safe_resolve(args.input_file)
     if not input_path.exists():
         print(f"Error: Input file not found: {args.input_file}")
         sys.exit(1)
     
-    # Determine output path
+    # Determine output path (derive from input_path if not specified)
     if args.output:
-        output_path = Path(args.output)
+        output_path = _safe_resolve(args.output).parent / Path(args.output).name
+        output_path.parent.mkdir(parents=True, exist_ok=True)
     else:
         output_path = input_path.with_name(f"{input_path.stem}-{args.target}.pptx")
     
@@ -992,8 +982,8 @@ def main():
         print("Using Amazon Translate engine")
     
     # Load and translate presentation
-    print(f"Loading {args.input_file}...")
-    presentation = Presentation(args.input_file)
+    print(f"Loading {input_path}...")
+    presentation = Presentation(str(input_path))
     
     print(f"Translating from {args.source} to {args.target}...")
     try:
@@ -1004,7 +994,7 @@ def main():
 
     # Save output
     print(f"Saving {output_path}...")
-    presentation.save(str(output_path))
+    presentation.save(str(output_path.resolve()))
     print("Done!")
 
 
