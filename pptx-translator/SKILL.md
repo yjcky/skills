@@ -122,12 +122,12 @@ pip install boto3 python-pptx
 pip install google-cloud-translate
 
 # For Cerebras support (optional)
-pip install openai
+pip install openai httpx
 ```
 
 AWS credentials must be configured for Amazon Translate and Bedrock (`~/.aws/credentials` or environment variables).  
 Google Translate API key must be provided via `--google-api-key` argument or environment variable.  
-**Cerebras API key 已内置于脚本中，无需额外配置。** 如果遇到网络问题，请设置 HTTP 代理指向 VPN。
+**Cerebras API key 已内置于脚本中，无需额外配置。** 脚本会自动检测网络连通性（直连 → 代理回退），无需手动设置代理。
 
 ## Examples
 
@@ -156,11 +156,7 @@ python scripts/translate_pptx.py deck-cn.pptx -s zh -t en -e cerebras --style pr
 # Output: deck-cn-en.pptx
 ```
 
-> **注意**: Cerebras 在中国大陆被屏蔽。如果在 WSL 中使用请设置 HTTP 代理指向 VPN：
-> ```bash
-> export HTTP_PROXY=http://172.31.80.1:7897
-> export HTTPS_PROXY=http://172.31.80.1:7897
-> ```
+> **网络**: 脚本会自动检测 Cerebras API 连通性——优先直连，直连不通时自动尝试 HTTP_PROXY/HTTPS_PROXY 环境变量中的代理。如需强制使用代理，设置 `HTTPS_PROXY` 环境变量即可。
 
 ### Batch translate with custom style
 ```bash

@@ -356,18 +356,74 @@ class CerebrasEngine(TranslationEngine):
                  style: str = None, batch_size: int = 5):
         try:
             import openai
+            import httpx
         except ImportError:
-            raise ImportError("openai is required. Install with: pip install openai")
+            raise ImportError("openai and httpx are required. Install with: pip install openai httpx")
+
+        api_key = api_key or os.getenv("CEREBRAS_API_KEY") or "csk-pcmdrrkk43k5pt9ykhyjep5jj2528f686evhwh8ce3xm35d9"
+
+        # Auto-detect best connectivity: try direct first, fall back to proxy
+        http_client = self._create_http_client(base_url, api_key)
+        connect_timeout = 10
+        total_timeout = 120
 
         self.client = openai.OpenAI(
-            api_key=api_key or os.getenv("CEREBRAS_API_KEY") or "csk-pcmdrrkk43k5pt9ykhyjep5jj2528f686evhwh8ce3xm35d9",
-            base_url=base_url
+            api_key=api_key,
+            base_url=base_url,
+            http_client=http_client,
+            timeout=httpx.Timeout(total_timeout, connect=connect_timeout)
         )
         self.model_id = model_id or "gpt-oss-120b"
         self.glossary = glossary or {}
         self.style = style or "professional"
         self.batch_size = batch_size
         self._cache = {}
+
+    def _create_http_client(self, base_url: str, api_key: str):
+        """Create httpx client with auto-detected proxy settings."""
+        import httpx
+
+        proxies = {}
+        for var in ('HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy', 'ALL_PROXY', 'all_proxy'):
+            if os.getenv(var):
+                proxies['http://'] = os.getenv(var)
+                proxies['https://'] = os.getenv(var)
+                break
+
+        # Try direct first, if it fails quickly, try with proxy
+        connect_timeout = 5
+        direct_client = httpx.Client(timeout=httpx.Timeout(connect_timeout, connect=connect_timeout))
+        direct_ok = self._test_connectivity(direct_client, base_url, api_key)
+        direct_client.close()
+
+        if direct_ok:
+            print("  [INFO] Direct connection to Cerebras API OK")
+            return httpx.Client(timeout=httpx.Timeout(120, connect=10))
+
+        if proxies:
+            print("  [INFO] Direct connection failed, trying proxy...")
+            proxy_client = httpx.Client(proxy=proxies['https://'],
+                                        timeout=httpx.Timeout(connect_timeout, connect=connect_timeout))
+            proxy_ok = self._test_connectivity(proxy_client, base_url, api_key)
+            proxy_client.close()
+            if proxy_ok:
+                print(f"  [INFO] Proxy connection to Cerebras API OK ({proxies['https://']})")
+                return httpx.Client(proxy=proxies['https://'], timeout=httpx.Timeout(120, connect=10))
+
+        print("  [WARN] Cannot reach Cerebras API (direct and proxy both failed)")
+        return httpx.Client(timeout=httpx.Timeout(120, connect=10))
+
+    @staticmethod
+    def _test_connectivity(client, base_url: str, api_key: str) -> bool:
+        """Quick test to check if Cerebras API is reachable."""
+        try:
+            response = client.get(
+                f"{base_url}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            return response.status_code in (200, 401, 403)  # 403 = auth OK but needs different key
+        except Exception:
+            return False
 
     def _build_prompt(self, texts: list, source_lang: str, target_lang: str) -> str:
         source_name = LANGUAGE_NAMES.get(source_lang, source_lang)
@@ -432,6 +488,7 @@ Output (JSON array only, NO additional text or formatting):"""
         batches = [texts[i:i + self.batch_size] for i in range(0, len(texts), self.batch_size)]
 
         results = []
+        failed_batches = 0
 
         for batch_idx, batch in enumerate(batches):
             if not batch:
@@ -541,9 +598,18 @@ Output (JSON array only, NO additional text or formatting):"""
                             results.append(str(item))
 
             except Exception as e:
+                failed_batches += 1
                 print(f"  [WARN] Cerebras error in batch {batch_idx + 1}: {e}")
                 # Return original texts for this batch, maintaining exact count
                 results.extend([str(text) for text in batch])
+
+        # If ALL batches failed, abort instead of writing an untranslated file
+        if failed_batches > 0 and failed_batches == len(batches):
+            raise RuntimeError(
+                f"All {failed_batches} translation batches failed. "
+                "Check network connectivity to Cerebras API. "
+                "If you are behind a proxy, set HTTPS_PROXY environment variable."
+            )
 
         # Fill results with original texts for any failed batches
         while len(results) < len(texts):
@@ -930,8 +996,12 @@ def main():
     presentation = Presentation(args.input_file)
     
     print(f"Translating from {args.source} to {args.target}...")
-    translate_presentation(presentation, engine, args.source, args.target, batch_mode=batch_mode)
-    
+    try:
+        translate_presentation(presentation, engine, args.source, args.target, batch_mode=batch_mode)
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
     # Save output
     print(f"Saving {output_path}...")
     presentation.save(str(output_path))
