@@ -452,6 +452,14 @@ class CerebrasEngine(TranslationEngine):
    - Only capitalize proper nouns, acronyms, and the first word of a sentence
    - Do NOT capitalize common words in the middle of a sentence (will → will, NOT Will)
 """
+        elif target_lang in ('zh', 'ja', 'ko'):
+            cjk_rules = """
+5. CRITICAL — CJK spacing: Chinese, Japanese, and Korean text uses NO spaces between characters. Do NOT insert spaces between CJK characters. Examples:
+   - CORRECT: "标准制定" / INCORRECT: "标准 制定"
+   - CORRECT: "交通信号系统" / INCORRECT: "交通 信号 系统"
+   - When mixing CJK with Latin/numbers, a thin space is acceptable but not required
+6. Preserve any formatting markers, placeholders, or special characters
+"""
         else:
             cjk_rules = """
 5. Preserve any formatting markers, placeholders, or special characters
@@ -481,6 +489,19 @@ Output (JSON array only, NO additional text or formatting):"""
 
     def translate_batch(self, texts: list, source_lang: str, target_lang: str) -> list:
         """Translate a single batch of texts using Cerebras API, with retry on rate limit."""
+        result = self._translate_batch_inner(texts, source_lang, target_lang)
+        return self._clean_cjk_spacing(result, target_lang)
+
+    def _clean_cjk_spacing(self, texts: list, target_lang: str) -> list:
+        """Remove stray spaces inserted between CJK characters by the LLM."""
+        if target_lang not in ('zh', 'ja', 'ko'):
+            return texts
+        import re
+        cjk_range = r'[一-鿿㐀-䶿぀-ゟ゠-ヿ가-힯豈-﫿　-〿＀-￯]'
+        pattern = re.compile(f'({cjk_range})\\s+({cjk_range})')
+        return [pattern.sub(r'\1\2', str(t)) for t in texts]
+
+    def _translate_batch_inner(self, texts: list, source_lang: str, target_lang: str) -> list:
         if not texts:
             return []
 
