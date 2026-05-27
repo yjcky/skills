@@ -157,9 +157,128 @@ def post_process_translation(text: str, target_lang: str) -> str:
     return text.strip()
 
 
+def is_cjk_char(c):
+    """Return True if character is CJK (Chinese, Japanese, Korean) or fullwidth form."""
+    cp = ord(c)
+    return (
+        (0x4E00 <= cp <= 0x9FFF) or     # CJK Unified Ideographs
+        (0x3400 <= cp <= 0x4DBF) or     # CJK Unified Ideographs Extension A
+        (0xF900 <= cp <= 0xFAFF) or     # CJK Compatibility Ideographs
+        (0x3040 <= cp <= 0x309F) or     # Hiragana
+        (0x30A0 <= cp <= 0x30FF) or     # Katakana
+        (0xAC00 <= cp <= 0xD7AF) or     # Hangul Syllables
+        (0xFF00 <= cp <= 0xFFEF)        # Halfwidth and Fullwidth Forms
+    )
+
+
+def estimate_text_width_emu(text, font_size_emu):
+    """Estimate rendered line width in EMU using character-width heuristics.
+
+    CJK/fullwidth chars are ~2× the width of Latin chars at the same point size.
+    """
+    width = 0
+    for c in text:
+        if is_cjk_char(c):
+            width += font_size_emu * 1.0
+        elif c in (' ', '\t'):
+            width += font_size_emu * 0.15
+        else:
+            width += font_size_emu * 0.5
+    return int(width)
+
+
+def _get_available_text_width(shape):
+    """Calculate available text width in EMU, accounting for shape margins."""
+    tf = shape.text_frame
+    margin_left = tf.margin_left if tf.margin_left is not None else 91440
+    margin_right = tf.margin_right if tf.margin_right is not None else 91440
+    return max(0, shape.width - margin_left - margin_right)
+
+
+def auto_fit_paragraph_font(shape, para, min_pt=8, original_text=None):
+    """Shrink font size so translated text fits within the shape width.
+
+    For paragraphs with explicit font sizes, compares estimated text width
+    against available shape width directly. For inherited sizes, uses a
+    font-size-independent comparison between original CJK and translated EN
+    text widths to determine the shrink ratio. Preserves proportional size
+    relationships between runs.
+    """
+    if not shape or not para:
+        return
+    text = para.text
+    if not text or not text.strip():
+        return
+
+    from pptx.util import Pt
+
+    ref_size_emu = None
+    for run in para.runs:
+        if run.font.size is not None:
+            ref_size_emu = run.font.size
+            break
+    if ref_size_emu is None:
+        try:
+            if para.font.size is not None:
+                ref_size_emu = para.font.size
+        except Exception:
+            pass
+    if ref_size_emu is None:
+        try:
+            from pptx.oxml.ns import qn
+            pPr = para._p.find(qn('a:pPr'))
+            if pPr is not None:
+                defRPr = pPr.find(qn('a:defRPr'))
+                if defRPr is not None:
+                    sz = defRPr.get('sz')
+                    if sz:
+                        ref_size_emu = int(int(sz) * 127)
+        except Exception:
+            pass
+
+    available = _get_available_text_width(shape)
+    if available <= 0:
+        return
+
+    if ref_size_emu and ref_size_emu > 0:
+        # Explicit font size known — use absolute width comparison
+        current_pt = ref_size_emu / 12700
+        lines = text.split('\n')
+        max_line_width = 0
+        for line in lines:
+            if line.strip():
+                w = estimate_text_width_emu(line, ref_size_emu)
+                if w > max_line_width:
+                    max_line_width = w
+        allowed = available * 1.3  # 30% overflow tolerance
+        if max_line_width <= allowed:
+            return
+        ratio = allowed / max_line_width
+    elif original_text and original_text.strip():
+        # Inherited font size — use font-size-independent CJK/EN comparison
+        ref_emu = 12700  # 1pt as neutral reference
+        cjk_w = estimate_text_width_emu(original_text, ref_emu)
+        en_w = estimate_text_width_emu(text, ref_emu)
+        if en_w <= cjk_w * 1.3:
+            return
+        ratio = cjk_w / en_w
+        ratio = ratio ** 0.5  # sqrt-soften: wrapping helps absorb extra width
+        shape_h_pt = shape.height / 12700
+        current_pt = max(10, shape_h_pt * 0.25)
+    else:
+        return
+
+    for run in para.runs:
+        if run.font.size is not None:
+            run_pt = run.font.size / 12700
+            run.font.size = int(max(min_pt, run_pt * ratio) * 12700)
+        else:
+            run.font.size = int(max(min_pt, current_pt * ratio) * 12700)
+
+
 class TranslationEngine:
     """Base class for translation engines."""
-    
+
     def translate(self, text: str, source_lang: str, target_lang: str) -> str:
         raise NotImplementedError
 
@@ -360,7 +479,7 @@ class CerebrasEngine(TranslationEngine):
         except ImportError:
             raise ImportError("openai and httpx are required. Install with: pip install openai httpx")
 
-        api_key = api_key or os.getenv("CEREBRAS_API_KEY") or "csk-pcmdrrkk43k5pt9ykhyjep5jj2528f686evhwh8ce3xm35d9"
+        api_key = api_key or os.getenv("CEREBRAS_API_KEY") or "csk-wx6enwt65ttv6mn5nnjxk6x349vn8mh9yjyvr86mvnv369mk"
 
         # Auto-detect best connectivity: try direct first, fall back to proxy
         http_client = self._create_http_client(base_url, api_key)
@@ -640,7 +759,8 @@ def extract_texts_from_presentation(presentation) -> list:
                                     'text': para_text,
                                     'location': ('table', slide_idx, shape_idx, row_idx, cell_idx, para_idx, 'paragraph'),
                                     'original_text': para_text,
-                                    'paragraph': para
+                                    'paragraph': para,
+                                    'shape': shape
                                 })
             elif shape.has_text_frame:
                 for para_idx, para in enumerate(shape.text_frame.paragraphs):
@@ -651,7 +771,8 @@ def extract_texts_from_presentation(presentation) -> list:
                             'text': para_text,
                             'location': ('shape', slide_idx, shape_idx, para_idx, 'paragraph'),
                             'original_text': para_text,
-                            'paragraph': para  # 保存段落引用
+                            'paragraph': para,  # 保存段落引用
+                            'shape': shape
                         })
 
         # Notes
@@ -664,7 +785,8 @@ def extract_texts_from_presentation(presentation) -> list:
                         'text': para_text,
                         'location': ('notes', slide_idx, para_idx, 'paragraph'),
                         'original_text': para_text,
-                        'paragraph': para  # 保存段落引用
+                        'paragraph': para,  # 保存段落引用
+                        'shape': None
                     })
 
     return texts
@@ -842,6 +964,11 @@ def translate_presentation(presentation, engine: TranslationEngine, source_lang:
                 para = item['paragraph']
                 try:
                     apply_paragraph_translation(para, translated_text)
+                    if item.get('shape'):
+                        try:
+                            auto_fit_paragraph_font(item['shape'], para, original_text=item.get('original_text'))
+                        except Exception:
+                            pass
                     print(f"  Applied paragraph translation to {item['location'][0]} on slide {item['location'][1] + 1}")
                 except Exception as e:
                     print(f"  [ERROR] Failed to apply paragraph translation at position {idx}: {e}")
@@ -872,21 +999,28 @@ def translate_presentation(presentation, engine: TranslationEngine, source_lang:
                 if shape.has_table:
                     for row in shape.table.rows:
                         for cell in row.cells:
-                            translate_text_frame(cell.text_frame, engine, source_lang, target_lang)
+                            translate_text_frame(cell.text_frame, engine, source_lang, target_lang, shape=shape)
                 elif shape.has_text_frame:
-                    translate_text_frame(shape.text_frame, engine, source_lang, target_lang)
+                    translate_text_frame(shape.text_frame, engine, source_lang, target_lang, shape=shape)
             
             if slide.has_notes_slide:
                 translate_text_frame(slide.notes_slide.notes_text_frame, engine, source_lang, target_lang)
 
 
-def translate_text_frame(text_frame, engine: TranslationEngine, source_lang: str, target_lang: str):
+def translate_text_frame(text_frame, engine: TranslationEngine, source_lang: str, target_lang: str, shape=None):
     """Translate all text in a text frame."""
     for paragraph in text_frame.paragraphs:
+        translated = False
         for run in paragraph.runs:
             if run.text.strip():
-                translated = engine.translate(run.text, source_lang, target_lang)
-                run.text = post_process_translation(translated, target_lang)
+                translated_text = engine.translate(run.text, source_lang, target_lang)
+                run.text = post_process_translation(translated_text, target_lang)
+                translated = True
+        if translated and shape:
+            try:
+                auto_fit_paragraph_font(shape, paragraph)
+            except Exception:
+                pass
 
 
 def main():
