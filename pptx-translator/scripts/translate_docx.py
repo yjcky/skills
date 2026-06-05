@@ -545,24 +545,50 @@ def translate_document(doc, engine: TranslationEngine, source_lang: str,
         batch_count = len(batches)
 
         import concurrent.futures
+        import time
         translated_texts = []
 
-        max_workers = min(3, batch_count)
-        print(f"Translating {batch_count} batches with {max_workers} concurrent workers...")
+        # Cerebras rate limiting: 5 req/min → need 12-15s between batches
+        is_cerebras = isinstance(engine, CerebrasEngine)
+        if is_cerebras:
+            max_workers = 1
+            min_delay = 14.0  # seconds between batches (5/min = 12s, add buffer)
+        else:
+            max_workers = min(3, batch_count)
+            min_delay = 0
+
+        print(f"Translating {batch_count} batches with {max_workers} concurrent workers"
+              + (f" (min {min_delay:.0f}s delay for rate limit)" if is_cerebras else "")
+              + "...")
 
         results_by_index = {}
         failed_count = 0
+        _last_submit_time = [0.0]  # mutable for closure
+
+        def submit_batch(idx, batch):
+            """Submit a batch with rate-limit pacing."""
+            if is_cerebras:
+                elapsed = time.time() - _last_submit_time[0]
+                if elapsed < min_delay:
+                    time.sleep(min_delay - elapsed)
+            result = engine.translate_batch(batch, source_lang, target_lang)
+            if is_cerebras:
+                _last_submit_time[0] = time.time()
+            return idx, result
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_idx = {}
             for idx, batch in enumerate(batches):
-                future = executor.submit(engine.translate_batch, batch, source_lang, target_lang)
+                future = executor.submit(submit_batch, idx, batch)
                 future_to_idx[future] = idx
+                if is_cerebras and idx == 0:
+                    _last_submit_time[0] = time.time()
 
             for future in concurrent.futures.as_completed(future_to_idx):
                 idx = future_to_idx[future]
                 try:
-                    results_by_index[idx] = future.result()
+                    bidx, result = future.result()
+                    results_by_index[bidx] = result
                 except Exception as e:
                     failed_count += 1
                     print(f"  [ERROR] Batch {idx + 1}/{batch_count} failed: {e}")
