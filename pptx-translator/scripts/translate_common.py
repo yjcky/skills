@@ -390,13 +390,18 @@ Output (JSON array only, NO additional text or formatting):"""
         prompt = self._build_prompt(texts, source_lang, target_lang)
         import time
 
+        # Estimate tokens needed: prompt + room for output
+        prompt_chars = len(prompt)
+        estimated_input_tokens = prompt_chars // 3  # rough: 3 chars per token for EN, 1.5 for CJK
+        self._last_prompt_size = estimated_input_tokens
+
         max_retries = 3
         for attempt in range(max_retries + 1):
             try:
                 response = self.client.chat.completions.create(
                     model=self.model_id,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=max(2000, len(texts) * 100),
+                    max_tokens=max(4096, len(texts) * 500),
                     temperature=0.1,
                     n=1
                 )
@@ -404,7 +409,18 @@ Output (JSON array only, NO additional text or formatting):"""
                 content = response.choices[0].message.content
                 if content is None:
                     refusal = getattr(response.choices[0].message, 'refusal', None)
-                    print(f"  [WARN] Empty content in Cerebras response (refusal: {refusal})")
+                    if refusal:
+                        print(f"  [WARN] Cerebras refused: {refusal}")
+                        return [str(text) for text in texts]
+                    # Empty content without refusal — likely timeout/overload, retry
+                    if attempt < max_retries:
+                        delay = (attempt + 1) * 4
+                        print(f"  [RETRY] Cerebras returned empty, waiting {delay}s "
+                              f"(attempt {attempt + 1}/{max_retries}, "
+                              f"prompt ~{estimated_input_tokens} tok)...")
+                        time.sleep(delay)
+                        continue
+                    print(f"  [WARN] Empty content after {max_retries + 1} attempts")
                     return [str(text) for text in texts]
 
                 response_text = content.strip()
@@ -496,7 +512,7 @@ def _build_cjk_rules(source_lang: str, target_lang: str) -> str:
    - CORRECT: "标准制定" / INCORRECT: "标准 制定"
    - CORRECT: "交通信号系统" / INCORRECT: "交通 信号 系统"
    - When mixing CJK with Latin/numbers, a thin space is acceptable but not required
-6. Preserve any formatting markers, placeholders, or special characters
+6. Preserve formatting tags (<b>...</b>, <i>...</i>, <bi>...</bi>) ONLY where they appear in the source text. Keep them wrapped around the corresponding translated text. Do NOT add NEW tags, do NOT drop existing tags.
 """
     else:
         return """

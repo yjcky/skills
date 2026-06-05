@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -31,9 +32,229 @@ from translate_common import (
 # DOCX-specific: text extraction
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Formatting-aware text extraction & application
+# ---------------------------------------------------------------------------
+
+# Tags used to mark formatting in source text for LLM preservation
+# <b> = bold, <i> = italic, <bi> = bold+italic
+_FMT_TAG_RE = re.compile(r'(</?bi>|</?b>|</?i>)')
+
+
+def _build_marked_text(para):
+    """Wrap formatted runs in XML-like tags for markup-preserving translation.
+
+    Returns:
+        (marked_text, marked_runs_info)
+        marked_runs_info: list of {bold, italic, has_text, char_count} per run
+    """
+    marked_runs_info = []
+    parts = []
+
+    for run in para.runs:
+        is_bold = bool(run.bold)
+        is_italic = bool(run.italic)
+        has_text = bool(run.text.strip())
+        info = {
+            'bold': is_bold,
+            'italic': is_italic,
+            'has_text': has_text,
+            'char_count': len(run.text),
+        }
+        marked_runs_info.append(info)
+
+        text = run.text
+        if not text.strip():
+            parts.append(text)
+        elif is_bold and is_italic:
+            parts.append(f'<bi>{text}</bi>')
+        elif is_bold:
+            parts.append(f'<b>{text}</b>')
+        elif is_italic:
+            parts.append(f'<i>{text}</i>')
+        else:
+            parts.append(text)
+
+    return ''.join(parts), marked_runs_info
+
+
+def _parse_formatted_translation(translated_text, marked_runs_info):
+    """Parse tag-preserving translated text back into per-run strings.
+
+    Tokenizes the translated text at formatting tag boundaries, collects
+    consecutive same-format segments, then assigns them to runs in order.
+    Same-format runs whose tags were merged by the LLM are split proportionally.
+
+    Returns list of strings (one per run) or None if tags were lost.
+    """
+    if not _FMT_TAG_RE.search(translated_text):
+        return None  # Tags stripped — caller must fall back
+
+    # ── Tokenize at tag boundaries ──
+    tokens = _FMT_TAG_RE.split(translated_text)
+
+    bold = italic = False
+    segments = []  # [{text, bold, italic}]
+
+    for tok in tokens:
+        if not tok:
+            continue
+        if tok == '<b>':
+            bold = True
+        elif tok == '</b>':
+            bold = False
+        elif tok == '<i>':
+            italic = True
+        elif tok == '</i>':
+            italic = False
+        elif tok == '<bi>':
+            bold = italic = True
+        elif tok == '</bi>':
+            bold = italic = False
+        else:
+            seg_text = tok.strip()
+            if seg_text:
+                segments.append({'text': seg_text, 'bold': bold, 'italic': italic})
+
+    if not segments:
+        return None
+
+    # ── Assign segments to runs (format-guided, in order) ──
+    result = []
+    seg_idx = 0
+    seg_count = len(segments)
+
+    for info in marked_runs_info:
+        if not info['has_text']:
+            result.append('')
+            continue
+
+        if seg_idx >= seg_count:
+            result.append('')
+            continue
+
+        # Collect consecutive segments matching this run's format
+        parts = []
+        while (seg_idx < seg_count
+               and segments[seg_idx]['bold'] == info['bold']
+               and segments[seg_idx]['italic'] == info['italic']):
+            parts.append(segments[seg_idx]['text'])
+            seg_idx += 1
+
+        if parts:
+            result.append(''.join(parts))
+        else:
+            # Format mismatch — take the next segment anyway
+            result.append(segments[seg_idx]['text'])
+            seg_idx += 1
+
+    # Pad to match run count
+    while len(result) < len(marked_runs_info):
+        result.append('')
+
+    # ── Handle leftover segments (LLM hallucinated extra tags) ──
+    if seg_idx < seg_count:
+        # Merge all remaining segment text into the last valid run
+        leftover = ''.join(s['text'] for s in segments[seg_idx:])
+        for i in range(len(result) - 1, -1, -1):
+            if result[i]:
+                result[i] += leftover
+                break
+        else:
+            # No non-empty run — put everything in the first text-bearing run
+            for i, info in enumerate(marked_runs_info):
+                if info['has_text']:
+                    if i < len(result):
+                        result[i] = leftover
+                    break
+
+    # ── Post-process: split merged same-format runs proportionally ──
+    final = []
+    res_idx = 0
+    run_idx = 0
+
+    while run_idx < len(marked_runs_info) and res_idx < len(result):
+        info = marked_runs_info[run_idx]
+        if not info['has_text']:
+            final.append('')
+            run_idx += 1
+            continue
+
+        # Count consecutive runs with identical formatting
+        same_count = 1
+        while run_idx + same_count < len(marked_runs_info):
+            nxt = marked_runs_info[run_idx + same_count]
+            if (nxt['bold'] == info['bold']
+                    and nxt['italic'] == info['italic']
+                    and nxt['has_text']):
+                same_count += 1
+            else:
+                break
+
+        if same_count == 1:
+            final.append(result[res_idx])
+            run_idx += 1
+        else:
+            # Split proportionally among same-format runs
+            char_counts = [marked_runs_info[run_idx + j]['char_count']
+                           for j in range(same_count)]
+            splits = _split_text_proportionally(result[res_idx], char_counts)
+            final.extend(splits)
+            run_idx += same_count
+
+        res_idx += 1
+
+    while len(final) < len(marked_runs_info):
+        final.append('')
+
+    return final[:len(marked_runs_info)]
+
+
+def _split_text_proportionally(translated_text, char_counts):
+    """Split translated text across runs proportionally (largest remainder method).
+
+    Used as a fallback when tags are lost, or to split merged same-format runs.
+    """
+    if not char_counts:
+        return [translated_text]
+
+    n_text = len(translated_text)
+    if n_text == 0:
+        return [''] * len(char_counts)
+
+    total = sum(char_counts)
+    if total == 0:
+        result = [''] * len(char_counts)
+        if result:
+            result[0] = translated_text
+        return result
+
+    targets = [count / total * n_text for count in char_counts]
+    base = [int(t) for t in targets]
+
+    remaining = n_text - sum(base)
+    if remaining > 0:
+        remainders = [(targets[i] - base[i], i) for i in range(len(base))]
+        remainders.sort(key=lambda x: x[0], reverse=True)
+        for j in range(remaining):
+            base[remainders[j][1]] += 1
+
+    result = []
+    pos = 0
+    for length in base:
+        if length > 0:
+            result.append(translated_text[pos:pos + length])
+            pos += length
+        else:
+            result.append('')
+    return result
+
+
 def _merge_paragraph_text(para):
-    """Merge all runs in a paragraph into a single string for full-context translation."""
-    return ''.join(run.text for run in para.runs if run.text.strip())
+    """Merge all runs into a single string; also return per-run char counts."""
+    runs_info = [len(run.text) for run in para.runs]
+    merged = ''.join(run.text for run in para.runs if run.text.strip())
+    return merged, runs_info
 
 
 def extract_texts_from_document(doc) -> list:
@@ -45,13 +266,14 @@ def extract_texts_from_document(doc) -> list:
 
     # --- Body paragraphs ---
     for para_idx, para in enumerate(doc.paragraphs):
-        text = _merge_paragraph_text(para)
+        text, marked_runs_info = _build_marked_text(para)
         if text.strip():
             texts.append({
                 'text': text,
                 'location': ('paragraph', para_idx),
                 'original_text': text,
                 'paragraph': para,
+                'marked_runs_info': marked_runs_info,
             })
 
     # --- Tables ---
@@ -59,13 +281,14 @@ def extract_texts_from_document(doc) -> list:
         for row_idx, row in enumerate(table.rows):
             for cell_idx, cell in enumerate(row.cells):
                 for para_idx, para in enumerate(cell.paragraphs):
-                    text = _merge_paragraph_text(para)
+                    text, marked_runs_info = _build_marked_text(para)
                     if text.strip():
                         texts.append({
                             'text': text,
                             'location': ('table', table_idx, row_idx, cell_idx, para_idx),
                             'original_text': text,
                             'paragraph': para,
+                            'marked_runs_info': marked_runs_info,
                         })
 
     # --- Headers & Footers ---
@@ -73,51 +296,55 @@ def extract_texts_from_document(doc) -> list:
         # Header
         if section.header:
             for para_idx, para in enumerate(section.header.paragraphs):
-                text = _merge_paragraph_text(para)
+                text, marked_runs_info = _build_marked_text(para)
                 if text.strip():
                     texts.append({
                         'text': text,
                         'location': ('header', section_idx, para_idx),
                         'original_text': text,
                         'paragraph': para,
+                        'marked_runs_info': marked_runs_info,
                     })
             # Header tables
             for table_idx, table in enumerate(section.header.tables):
                 for row_idx, row in enumerate(table.rows):
                     for cell_idx, cell in enumerate(row.cells):
                         for para_idx, para in enumerate(cell.paragraphs):
-                            text = _merge_paragraph_text(para)
+                            text, marked_runs_info = _build_marked_text(para)
                             if text.strip():
                                 texts.append({
                                     'text': text,
                                     'location': ('header_table', section_idx, table_idx, row_idx, cell_idx, para_idx),
                                     'original_text': text,
                                     'paragraph': para,
+                                    'marked_runs_info': marked_runs_info,
                                 })
 
         # Footer
         if section.footer:
             for para_idx, para in enumerate(section.footer.paragraphs):
-                text = _merge_paragraph_text(para)
+                text, marked_runs_info = _build_marked_text(para)
                 if text.strip():
                     texts.append({
                         'text': text,
                         'location': ('footer', section_idx, para_idx),
                         'original_text': text,
                         'paragraph': para,
+                        'marked_runs_info': marked_runs_info,
                     })
             # Footer tables
             for table_idx, table in enumerate(section.footer.tables):
                 for row_idx, row in enumerate(table.rows):
                     for cell_idx, cell in enumerate(row.cells):
                         for para_idx, para in enumerate(cell.paragraphs):
-                            text = _merge_paragraph_text(para)
+                            text, marked_runs_info = _build_marked_text(para)
                             if text.strip():
                                 texts.append({
                                     'text': text,
                                     'location': ('footer_table', section_idx, table_idx, row_idx, cell_idx, para_idx),
                                     'original_text': text,
                                     'paragraph': para,
+                                    'marked_runs_info': marked_runs_info,
                                 })
 
     return texts
@@ -190,22 +417,38 @@ def find_paragraph_by_location(location, doc):
     return None
 
 
-def apply_paragraph_translation(para, translated_text):
-    """Apply translated text to a paragraph — first run gets all text, rest cleared.
+def apply_paragraph_translation(para, translated_text, marked_runs_info=None):
+    """Apply translated text to a paragraph.
 
-    Preserves the first run's formatting (font, size, color, bold, italic, etc.)
-    and applies it to the translated text.
+    Strategy (tried in order):
+    1. Tag-based parsing: if marked_runs_info is provided, parse formatting
+       tags (<b>, <i>, <bi>) from the LLM output to reconstruct per-run texts
+       with correct formatting boundaries (no mid-word breaks).
+    2. Fallback: if tags were lost, put all text in the first run.
     """
     if not para or not translated_text:
         return
 
     runs = para.runs
-    if runs:
-        runs[0].text = translated_text
-        for run in runs[1:]:
-            run.text = ""
-    else:
+    if not runs:
         para.add_run(translated_text)
+        return
+
+    if marked_runs_info:
+        # Try tag-based parsing first (best quality — preserves format boundaries)
+        result = _parse_formatted_translation(translated_text, marked_runs_info)
+        if result is not None:
+            for i, run in enumerate(runs):
+                if i < len(result):
+                    run.text = result[i]
+                else:
+                    run.text = ''
+            return
+
+    # Fallback: first run gets all translated text
+    runs[0].text = translated_text
+    for run in runs[1:]:
+        run.text = ""
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +461,8 @@ def translate_document_sequential(doc, engine: TranslationEngine, source_lang: s
 
     # Collect body paragraphs
     for para in doc.paragraphs:
-        if _merge_paragraph_text(para).strip():
+        text, _ = _merge_paragraph_text(para)
+        if text.strip():
             todo.append(para)
 
     # Collect table paragraphs
@@ -226,33 +470,36 @@ def translate_document_sequential(doc, engine: TranslationEngine, source_lang: s
         for row in table.rows:
             for cell in row.cells:
                 for para in cell.paragraphs:
-                    if _merge_paragraph_text(para).strip():
+                    text, _ = _merge_paragraph_text(para)
+                    if text.strip():
                         todo.append(para)
 
     # Collect headers/footers
     for section in doc.sections:
-        for header in (section.header,):
-            if header:
-                for para in header.paragraphs:
-                    if _merge_paragraph_text(para).strip():
-                        todo.append(para)
-                for table in header.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            for para in cell.paragraphs:
-                                if _merge_paragraph_text(para).strip():
-                                    todo.append(para)
-        for footer in (section.footer,):
-            if footer:
-                for para in footer.paragraphs:
-                    if _merge_paragraph_text(para).strip():
-                        todo.append(para)
-                for table in footer.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            for para in cell.paragraphs:
-                                if _merge_paragraph_text(para).strip():
-                                    todo.append(para)
+        if section.header:
+            for para in section.header.paragraphs:
+                text, _ = _merge_paragraph_text(para)
+                if text.strip():
+                    todo.append(para)
+            for table in section.header.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for para in cell.paragraphs:
+                            text, _ = _merge_paragraph_text(para)
+                            if text.strip():
+                                todo.append(para)
+        if section.footer:
+            for para in section.footer.paragraphs:
+                text, _ = _merge_paragraph_text(para)
+                if text.strip():
+                    todo.append(para)
+            for table in section.footer.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        for para in cell.paragraphs:
+                            text, _ = _merge_paragraph_text(para)
+                            if text.strip():
+                                todo.append(para)
 
     total = len(todo)
     for idx, para in enumerate(todo, 1):
@@ -265,7 +512,7 @@ def translate_document_sequential(doc, engine: TranslationEngine, source_lang: s
                 translated = True
         # If no runs were translated but paragraph has text, translate the first run
         if not translated and para.runs:
-            para_text = _merge_paragraph_text(para)
+            para_text, _ = _merge_paragraph_text(para)
             if para_text.strip():
                 translated_text = engine.translate(para_text, source_lang, target_lang)
                 para.runs[0].text = post_process_translation(translated_text, target_lang)
@@ -357,7 +604,7 @@ def translate_document(doc, engine: TranslationEngine, source_lang: str,
             para = item.get('paragraph')
             if para is not None:
                 try:
-                    apply_paragraph_translation(para, translated_text)
+                    apply_paragraph_translation(para, translated_text, item.get('marked_runs_info'))
                     loc_type = item['location'][0]
                     print(f"  Applied translation to {loc_type} #{idx + 1}")
                 except Exception as e:
