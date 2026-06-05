@@ -1,26 +1,35 @@
 ---
 name: pptx-translator
-description: "Translate PowerPoint (.pptx) files between languages using Amazon Translate, Bedrock LLM, Google Translate, or Cerebras LLM. Use when: (1) translating presentations to other languages, (2) localizing slide decks for international audiences, (3) converting Chinese/Japanese/Korean presentations to English or vice versa. Supports four engines: Amazon Translate (fast, cost-effective), Bedrock LLM (high quality), Google Translate (widely supported), and Cerebras LLM (open-source models). Preserves formatting, styles, and layout."
+description: "Translate Office documents (.pptx, .docx) between languages using Amazon Translate, Bedrock LLM, Google Translate, or Cerebras LLM. Use when: (1) translating presentations or Word documents to other languages, (2) localizing content for international audiences, (3) converting Chinese/Japanese/Korean documents to English or vice versa. Supports four engines: Amazon Translate (fast, cost-effective), Bedrock LLM (high quality), Google Translate (widely supported), and Cerebras LLM (open-source models). Preserves formatting, styles, and layout."
 ---
 
-# PPTX Translator
+# Office Document Translator
 
-Translate PowerPoint files using AWS services.
+Translate PowerPoint (.pptx) and Word (.docx) files using AWS services and LLMs.
 
 ## Quick Start
 
 ```bash
-# Amazon Translate (fast, cheap)
+# Unified entry (auto-detects format)
+python scripts/translate.py input.pptx -s zh -t en
+python scripts/translate.py input.docx -s zh -t en -e cerebras
+
+# Or use format-specific scripts directly:
+
+# PowerPoint — Amazon Translate (fast, cheap)
 python scripts/translate_pptx.py input.pptx -s zh -t en
 
-# Bedrock LLM (high quality)
+# PowerPoint — Bedrock LLM (high quality)
 python scripts/translate_pptx.py input.pptx -s zh -t en -e bedrock
 
-# Google Translate (widely supported)
-python scripts/translate_pptx.py input.pptx -s zh -t en -e google --google-api-key YOUR_API_KEY
+# Word — Cerebras LLM (open-source models, API key built-in)
+python scripts/translate_docx.py input.docx -s zh -t en -e cerebras
 
-# Cerebras LLM (open-source models, API key built-in)
-python scripts/translate_pptx.py input.pptx -s zh -t en -e cerebras
+# Word — Google Translate (widely supported)
+python scripts/translate_docx.py input.docx -s zh -t en -e google --google-api-key YOUR_API_KEY
+
+# Word — Bedrock LLM (high quality)
+python scripts/translate_docx.py input.docx -s zh -t en -e bedrock
 ```
 
 ## Engine Selection
@@ -38,40 +47,38 @@ python scripts/translate_pptx.py input.pptx -s zh -t en -e cerebras
 
 ## Commands
 
+All commands work for both `.pptx` and `.docx` — just change the script name and file extension:
+
 ### Translate with Amazon Translate
 ```bash
-python scripts/translate_pptx.py input.pptx \
-  --source en --target zh \
-  --engine translate \
-  --terminology terms.csv  # optional
+# PowerPoint
+python scripts/translate_pptx.py input.pptx -s en -t zh --engine translate
+# Word
+python scripts/translate_docx.py input.docx -s en -t zh --engine translate
 ```
 
 ### Translate with Bedrock LLM
 ```bash
-python scripts/translate_pptx.py input.pptx \
-  --source en --target zh \
-  --engine bedrock \
+# PowerPoint
+python scripts/translate_pptx.py input.pptx -s en -t zh -e bedrock \
   --model anthropic.claude-3-5-sonnet-20241022-v2:0 \
-  --glossary glossary.json \
-  --style professional \
-  --batch-size 20
+  --glossary glossary.json --style professional
+# Word
+python scripts/translate_docx.py input.docx -s en -t zh -e bedrock \
+  --model anthropic.claude-3-5-sonnet-20241022-v2:0 \
+  --glossary glossary.json --style professional
 ```
 
 ### Translate with Google Translate
 ```bash
-python scripts/translate_pptx.py input.pptx \
-  --source en --target zh \
-  --engine google \
-  --google-api-key YOUR_API_KEY \
-  --google-project-id YOUR_PROJECT_ID  # optional
+python scripts/translate_pptx.py input.pptx -s en -t zh -e google --google-api-key KEY
+python scripts/translate_docx.py input.docx -s en -t zh -e google --google-api-key KEY
 ```
 
 ### Translate with Cerebras LLM
 ```bash
-python scripts/translate_pptx.py input.pptx \
-  --source en --target zh \
-  --engine cerebras \
-  --style professional
+python scripts/translate_pptx.py input.pptx -s en -t zh -e cerebras --style professional
+python scripts/translate_docx.py input.docx -s en -t zh -e cerebras --style professional
 ```
 
 ### Extract texts for review
@@ -116,7 +123,11 @@ See [references/glossary-format.md](references/glossary-format.md) for format de
 ## Dependencies
 
 ```bash
+# Core (always required)
 pip install boto3 python-pptx
+
+# For Word document support
+pip install python-docx
 
 # For Google Translate support (optional)
 pip install google-cloud-translate
@@ -131,29 +142,27 @@ Google Translate API key must be provided via `--google-api-key` argument or env
 
 ## Examples
 
-### Chinese presentation → English
+### PowerPoint: Chinese → English
 ```bash
 python scripts/translate_pptx.py deck-cn.pptx -s zh -t en -e bedrock
 # Output: deck-cn-en.pptx
 ```
 
-### English → Japanese with terminology
+### Word: Chinese → English
 ```bash
-python scripts/translate_pptx.py slides.pptx -s en -t ja \
-  --terminology aws-terms.csv
+python scripts/translate_docx.py report-cn.docx -s zh -t en -e cerebras --style professional
+# Output: report-cn-en.docx
 ```
 
-### Google Translate: Chinese → English
+### Word: English → Japanese
 ```bash
-python scripts/translate_pptx.py deck-cn.pptx -s zh -t en -e google \
-  --google-api-key YOUR_API_KEY
-# Output: deck-cn-en.pptx
+python scripts/translate_docx.py document.docx -s en -t ja -e google --google-api-key KEY
+# Output: document-ja.docx
 ```
 
-### Cerebras LLM: Chinese → English
+### PowerPoint: English → Japanese with terminology
 ```bash
-python scripts/translate_pptx.py deck-cn.pptx -s zh -t en -e cerebras --style professional
-# Output: deck-cn-en.pptx
+python scripts/translate_pptx.py slides.pptx -s en -t ja --terminology aws-terms.csv
 ```
 
 > **网络**: 脚本会自动检测 Cerebras API 连通性——优先直连，直连不通时自动尝试 HTTP_PROXY/HTTPS_PROXY 环境变量中的代理。如需强制使用代理，设置 `HTTPS_PROXY` 环境变量即可。
@@ -163,4 +172,26 @@ python scripts/translate_pptx.py deck-cn.pptx -s zh -t en -e cerebras --style pr
 python scripts/translate_pptx.py marketing.pptx -s en -t zh \
   -e bedrock --style "friendly and engaging" --glossary brand-terms.json
 ```
+
+## Word Document Support
+
+The skill also translates Word (.docx) documents, covering:
+- Body paragraphs (preserving formatting: font, size, color, bold, italic)
+- Tables (all cells)
+- Headers and footers
+- Preserves document styles, page layout, and non-text content
+
+Unlike PPTX, Word documents are **flow-based** (no fixed text boxes), so the auto-fit font algorithm is not needed — the document naturally reflows text.
+
+### Usage
+```bash
+# Unified entry (auto-detects format)
+python scripts/translate.py input.docx -s zh -t en -e cerebras
+
+# Or use the docx-specific script
+python scripts/translate_docx.py input.docx -s zh -t en -e cerebras
+```
+
+All engines and options (glossary, style, batch-size, etc.) work identically for both formats.
+
 # 这是测试项目同步的一条信息
