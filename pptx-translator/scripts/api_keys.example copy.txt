@@ -1,0 +1,18 @@
+# API Keys for pptx-translator
+#
+# 使用方法：
+#   1. 复制此文件为 api_keys.txt
+#   2. 将下方的 your-xxx-here 替换为你的真实 API key
+#   3. 将该文件放在 scripts/ 目录下即可
+#
+# 更换 key 时只需编辑此文件，无需改代码。
+# 脚本自动搜索：scripts/ 目录 → 当前工作目录
+
+# Cerebras LLM API key (获取地址: https://cloud.cerebras.ai)
+CEREBRAS_API_KEY=your-cerebras-key-here
+
+# Google Cloud API key (获取地址: https://console.cloud.google.com)
+GOOGLE_API_KEY=your-google-key-here
+
+# Google Cloud project ID (可选)
+# GOOGLE_PROJECT_ID=your-project-id-here

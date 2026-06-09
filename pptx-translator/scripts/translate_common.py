@@ -90,6 +90,11 @@ LANGUAGE_NAMES = {
 
 def post_process_translation(text: str, target_lang: str) -> str:
     """Clean up common translation artifacts when translating to English."""
+    # Remove stray backslash escapes (LLM JSON artifact: \" → ", \; → ;, etc.)
+    # Handles cases where LLM outputs escaped characters in JSON that survive parsing
+    for ch in ('"', "'", ';', ':', '.', ','):
+        text = text.replace('\\' + ch, ch)
+
     if target_lang != 'en':
         return text
 
@@ -496,7 +501,7 @@ Output (JSON array only, NO additional text or formatting):"""
                     pass
 
                 # Try to extract array manually
-                json_match = re.search(r'\[(.*?)\]', response_text, re.DOTALL)
+                json_match = re.search(r'\[(.*)\]', response_text, re.DOTALL)
                 if json_match:
                     try:
                         translated_batch = json.loads(f"[{json_match.group(1)}]")
@@ -507,9 +512,16 @@ Output (JSON array only, NO additional text or formatting):"""
                         pass
 
                 # Extract quoted strings as last resort
-                string_matches = re.findall(r'"([^"]*)"', response_text)
+                # Use a regex that handles escaped quotes inside strings
+                string_matches = re.findall(r'"((?:[^"\\]|\\.)*)"', response_text)
                 if string_matches:
-                    return string_matches
+                    # Unescape common escapes in extracted strings
+                    unescaped = []
+                    for s in string_matches:
+                        for ch in ('"', "'", ';', ':', '.', ','):
+                            s = s.replace('\\' + ch, ch)
+                        unescaped.append(s)
+                    return unescaped
 
                 # Ultimate fallback: split by lines
                 lines = [line.strip() for line in response_text.split('\n')
