@@ -22,7 +22,7 @@ python scripts/translate_pptx.py input.pptx -s zh -t en
 # PowerPoint — Bedrock LLM (high quality)
 python scripts/translate_pptx.py input.pptx -s zh -t en -e bedrock
 
-# Word — Cerebras LLM (open-source models, API key built-in)
+# Word — Cerebras LLM (open-source models, key via api_keys.txt or --cerebras-api-key)
 python scripts/translate_docx.py input.docx -s zh -t en -e cerebras
 
 # Word — Google Translate (widely supported)
@@ -77,8 +77,11 @@ python scripts/translate_docx.py input.docx -s en -t zh -e google --google-api-k
 
 ### Translate with Cerebras LLM
 ```bash
+# 将 API key 放入 scripts/api_keys.txt（复制自 api_keys.example.txt），或通过参数传入
 python scripts/translate_pptx.py input.pptx -s en -t zh -e cerebras --style professional
 python scripts/translate_docx.py input.docx -s en -t zh -e cerebras --style professional
+# 也可直接传 key:
+python scripts/translate_pptx.py input.pptx -s en -t zh -e cerebras --cerebras-api-key YOUR_KEY
 ```
 
 ### Extract texts for review
@@ -137,8 +140,15 @@ pip install openai httpx
 ```
 
 AWS credentials must be configured for Amazon Translate and Bedrock (`~/.aws/credentials` or environment variables).  
-Google Translate API key must be provided via `--google-api-key` argument or environment variable.  
-**Cerebras API key 已内置于脚本中，无需额外配置。** 脚本会自动检测网络连通性（直连 → 代理回退），无需手动设置代理。
+
+**API Key 配置**: 将你的 key 写入 `scripts/api_keys.txt` 文件即可，一行一个：
+
+```bash
+cp scripts/api_keys.example.txt scripts/api_keys.txt
+# 编辑 api_keys.txt，填入真实的 key
+```
+
+更换 key 时只需编辑该文件，无需改代码。
 
 ## Examples
 

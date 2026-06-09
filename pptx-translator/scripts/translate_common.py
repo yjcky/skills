@@ -17,6 +17,61 @@ from pathlib import Path
 import boto3
 from botocore.exceptions import ClientError
 
+
+# ---------------------------------------------------------------------------
+# API key loading from external file
+# ---------------------------------------------------------------------------
+
+def load_api_keys(key_file: str = None) -> dict:
+    """Load API keys from a simple key=value text file.
+
+    Searches in order:
+      1. Explicit key_file path (if provided)
+      2. api_keys.txt in the same directory as this script
+      3. api_keys.txt in the current working directory
+
+    File format (one per line):
+      # comments start with #
+      CEREBRAS_API_KEY=csk-xxx
+      GOOGLE_API_KEY=xxx
+
+    Returns dict of key→value, empty dict if no file found.
+    """
+    search_paths = []
+    if key_file:
+        search_paths.append(Path(key_file))
+
+    # Same directory as this script
+    script_dir = Path(__file__).resolve().parent
+    search_paths.append(script_dir / 'api_keys.txt')
+
+    # Current working directory
+    search_paths.append(Path.cwd() / 'api_keys.txt')
+
+    for path in search_paths:
+        try:
+            if path.exists() and path.is_file():
+                keys = {}
+                with open(path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        line = line.strip()
+                        # Skip empty lines and comments
+                        if not line or line.startswith('#'):
+                            continue
+                        if '=' in line:
+                            key, value = line.split('=', 1)
+                            key = key.strip()
+                            value = value.strip()
+                            if value:  # Only store non-empty values
+                                keys[key] = value
+                if keys:
+                    print(f"  [INFO] Loaded API keys from: {path}")
+                return keys
+        except OSError:
+            continue
+
+    return {}
+
 # ---------------------------------------------------------------------------
 # Language metadata
 # ---------------------------------------------------------------------------
@@ -247,6 +302,9 @@ class GoogleTranslateEngine(TranslationEngine):
         except ImportError:
             raise ImportError("google-cloud-translate is required. Install with: pip install google-cloud-translate")
 
+        api_key = api_key or load_api_keys().get("GOOGLE_API_KEY")
+        project_id = project_id or load_api_keys().get("GOOGLE_PROJECT_ID")
+
         self.client = translate.Client(
             api_key=api_key,
             project=project_id
@@ -280,7 +338,7 @@ class CerebrasEngine(TranslationEngine):
         except ImportError:
             raise ImportError("openai and httpx are required. Install with: pip install openai httpx")
 
-        api_key = api_key or os.getenv("CEREBRAS_API_KEY") or "csk-wx6enwt65ttv6mn5nnjxk6x349vn8mh9yjyvr86mvnv369mk"
+        api_key = api_key or load_api_keys().get("CEREBRAS_API_KEY")
 
         http_client = self._create_http_client(base_url, api_key)
         connect_timeout = 10
@@ -573,10 +631,10 @@ def load_glossary(glossary_file: str) -> dict:
     path = Path(glossary_file)
 
     if path.suffix == '.json':
-        with open(path) as f:
+        with open(path, encoding='utf-8') as f:
             glossary = json.load(f)
     else:
-        with open(path) as f:
+        with open(path, encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
                 if line and '=' in line:
