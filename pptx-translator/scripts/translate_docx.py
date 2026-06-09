@@ -207,6 +207,21 @@ def _parse_formatted_translation(translated_text, marked_runs_info):
     while len(final) < len(marked_runs_info):
         final.append('')
 
+    # ── Ensure spacing between adjacent runs of different formats ──
+    # Chinese source has no spaces between words, so when translated to English,
+    # spaces are needed at format boundaries (e.g. bold→normal, italic→normal)
+    for i in range(len(final) - 1):
+        if not final[i] or not final[i + 1]:
+            continue
+        ri = marked_runs_info[i]
+        rj = marked_runs_info[i + 1]
+        if not ri['has_text'] or not rj['has_text']:
+            continue
+        if ri['bold'] != rj['bold'] or ri['italic'] != rj['italic']:
+            # Different formatting on adjacent runs — ensure a space separates them
+            if not final[i].endswith(' ') and not final[i + 1].startswith(' '):
+                final[i] += ' '
+
     return final[:len(marked_runs_info)]
 
 

@@ -94,6 +94,10 @@ def post_process_translation(text: str, target_lang: str) -> str:
     # Handles cases where LLM outputs escaped characters in JSON that survive parsing
     for ch in ('"', "'", ';', ':', '.', ','):
         text = text.replace('\\' + ch, ch)
+    # Fix double-escaped newlines from LLM JSON output
+    text = text.replace('\\n', '\n').replace('\\t', '\t')
+    # Replace non-breaking hyphen (U+2011, LLM artifact) with regular hyphen
+    text = text.replace('‑', '-')
 
     if target_lang != 'en':
         return text
@@ -113,30 +117,24 @@ def post_process_translation(text: str, target_lang: str) -> str:
     text = re.sub(r'([A-Za-z])([一-鿿㐀-䶿豈-﫿])', r'\1 \2', text)
 
     # Fix Latin word concatenation: camelCase / word boundary splitting
-    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    # Split lowercase→Uppercase+lowercase (true camelCase): myVariable → my Variable
+    # Does NOT split acronym endings: PaaS stays intact (a→S where S has no following lowercase)
+    text = re.sub(r'([a-z])([A-Z][a-z])', r'\1 \2', text)
+    # Split lowercase→ACRONYM: mySUTPC → my SUTPC
+    text = re.sub(r'([a-z])([A-Z]{2,})', r'\1 \2', text)
+    # Split ACRONYM→Uppercase+lowercase: SUTPCWill → SUTPC Will
     text = re.sub(r'([A-Z]{2,})([A-Z][a-z])', r'\1 \2', text)
+    # Split ACRONYM→lowercase: SUTPCwill → SUTPC will
     text = re.sub(r'([A-Z]{2,})([a-z])', r'\1 \2', text)
 
-    # Fix common English function-word concatenation (LLM output artifact from CJK→EN)
-    function_words = [
-        'without', 'through', 'between', 'during', 'before', 'after',
-        'about', 'above', 'across', 'against', 'along', 'among', 'around',
-        'from', 'with', 'over', 'into', 'onto', 'upon', 'than', 'that', 'this',
-        'will', 'have', 'been', 'being', 'were', 'when', 'what', 'where', 'which',
-        'while', 'their', 'there', 'these', 'those', 'other', 'every', 'first',
-        'must', 'just', 'also', 'such', 'only', 'then', 'them', 'very', 'much',
-        'due', 'and', 'for', 'the', 'not', 'but', 'can', 'may', 'has', 'had',
-        'all', 'any', 'its', 'his', 'her', 'our', 'was', 'are', 'one', 'two',
-        'of', 'to', 'in', 'on', 'at', 'by', 'or', 'an', 'is', 'it', 'be', 'as',
-        'we', 'he', 'so', 'no', 'if', 'do', 'go', 'my', 'me', 'us', 'up',
-    ]
-    function_words.sort(key=len, reverse=True)
-    fw_pattern = '|'.join(function_words)
-    text = re.sub(rf'^({fw_pattern})([a-z]{{3,}})', r'\1 \2', text)
-    text = re.sub(rf'([a-z])({fw_pattern})$', r'\1 \2', text)
+    # Fix missing space between letter and digit, or digit and letter
+    # over15000 → over 15000, 15000intersections → 15000 intersections
+    text = re.sub(r'([A-Za-z])(\d)', r'\1 \2', text)
+    text = re.sub(r'(\d)([A-Za-z])', r'\1 \2', text)
 
-    # Fix missing space after punctuation when followed by a letter/digit
-    text = re.sub(r'([.,;:!?])([A-Za-z0-9])', r'\1 \2', text)
+    # Fix missing space after punctuation when followed by a letter (not digit —
+    # digit means it's a number like "15,000" where no space is needed)
+    text = re.sub(r'([.,;:!?])([A-Za-z])', r'\1 \2', text)
 
     # Remove spaces before English punctuation (common LLM artifact)
     text = re.sub(r'\s+([.,;:!?)])', r'\1', text)
