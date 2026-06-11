@@ -602,6 +602,115 @@ def _clean_cjk_spacing(texts: list, target_lang: str) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Token-aware batch sizing (for LLM engines with TPM limits like Cerebras)
+# ---------------------------------------------------------------------------
+
+# Tunable constants for token estimation
+_TOKEN_DIVISOR_CJK = 1.5      # CJK characters per token (Chinese, Japanese, Korean)
+_TOKEN_DIVISOR_LATIN = 3.5    # Latin characters per token (English, etc.)
+_BATCH_FIXED_OVERHEAD = 250   # Prompt template overhead per batch (instructions, rules)
+_BATCH_GLOSSARY_OVERHEAD = 50 # Extra overhead when glossary is present
+_PER_TEXT_WRAPPER = 8         # JSON array wrapping per text (quotes, comma)
+
+
+def estimate_tokens(text: str, target_lang: str = None) -> int:
+    """Estimate token count for a text based on character types.
+
+    - CJK characters: ~{_TOKEN_DIVISOR_CJK} chars per token
+    - Latin characters: ~{_TOKEN_DIVISOR_LATIN} chars per token
+    - Mixed text: counted proportionally by character type
+    """
+    if not text:
+        return 0
+
+    cjk_chars = 0
+    latin_chars = 0
+
+    for ch in text:
+        cp = ord(ch)
+        # CJK Unified Ideographs, CJK Extension A, Hiragana, Katakana, Hangul,
+        # CJK Symbols/Punctuation, Fullwidth Forms
+        if (0x4E00 <= cp <= 0x9FFF or 0x3400 <= cp <= 0x4DBF or
+            0x3040 <= cp <= 0x30FF or 0xAC00 <= cp <= 0xD7AF or
+            0x3000 <= cp <= 0x303F or 0xFF00 <= cp <= 0xFFEF):
+            cjk_chars += 1
+        elif ch.isalpha() or ch.isdigit() or ch in ' \t\n\r':
+            latin_chars += 1
+        else:
+            # Punctuation, symbols — closer to Latin token density
+            latin_chars += 0.5
+
+    return int(cjk_chars / _TOKEN_DIVISOR_CJK + latin_chars / _TOKEN_DIVISOR_LATIN)
+
+
+def estimate_prompt_overhead(num_texts: int, has_glossary: bool = False) -> int:
+    """Estimate token overhead from the prompt template (NOT including text content).
+
+    Covers: instruction text, JSON formatting wrapper, optional glossary, CJK rules.
+    """
+    overhead = _BATCH_FIXED_OVERHEAD
+    if has_glossary:
+        overhead += _BATCH_GLOSSARY_OVERHEAD
+    overhead += num_texts * _PER_TEXT_WRAPPER
+    return overhead
+
+
+def token_aware_batch(texts: list, max_tokens: int = 25000,
+                      target_lang: str = None, has_glossary: bool = False) -> list:
+    """Group texts into batches based on estimated token counts (greedy algorithm).
+
+    Each text's token count is estimated; texts are added to the current batch
+    until adding the next would exceed ``max_tokens``, then a new batch starts.
+
+    Args:
+        texts: List of text strings to group.
+        max_tokens: Maximum estimated tokens per batch (input + output).
+        target_lang: Target language code (for future output-size estimation).
+        has_glossary: Whether a glossary is included (adds prompt overhead).
+
+    Returns:
+        List of batches, where each batch is a list of text strings.
+    """
+    if not texts:
+        return []
+
+    batch_fixed = _BATCH_FIXED_OVERHEAD + (_BATCH_GLOSSARY_OVERHEAD if has_glossary else 0)
+
+    batches = []
+    current_batch = []
+    current_tokens = 0
+
+    for text in texts:
+        text_tokens = estimate_tokens(text, target_lang) + _PER_TEXT_WRAPPER
+        # Add fixed overhead only for the first text in a batch
+        is_first = len(current_batch) == 0
+        extra = batch_fixed if is_first else 0
+
+        if current_tokens + text_tokens + extra > max_tokens and current_batch:
+            batches.append(current_batch)
+            current_batch = [text]
+            current_tokens = text_tokens + batch_fixed
+        else:
+            current_batch.append(text)
+            current_tokens += text_tokens + extra
+
+    if current_batch:
+        batches.append(current_batch)
+
+    # Warn for single-text batches that still exceed the limit
+    for i, batch in enumerate(batches):
+        if len(batch) == 1:
+            single_tokens = (estimate_tokens(batch[0], target_lang) +
+                             _PER_TEXT_WRAPPER + batch_fixed)
+            if single_tokens > max_tokens:
+                print(f"  [WARN] Batch {i + 1}: single text segment "
+                      f"({len(batch[0])} chars, ~{single_tokens} est. tokens) "
+                      f"exceeds max_batch_tokens ({max_tokens})")
+
+    return batches
+
+
+# ---------------------------------------------------------------------------
 # Engine factory
 # ---------------------------------------------------------------------------
 
@@ -698,6 +807,10 @@ def add_common_arguments(parser: argparse.ArgumentParser):
     parser.add_argument('--glossary', '-g', help='Glossary file for LLM (JSON or key=value format)')
     parser.add_argument('--style', help='Translation style for LLM (default: professional)')
     parser.add_argument('--batch-size', type=int, default=5, help='Batch size for LLM translation')
+    parser.add_argument('--auto-batch', action='store_true',
+                       help='Enable token-aware intelligent batching (respects TPM limits)')
+    parser.add_argument('--max-batch-tokens', type=int, default=25000,
+                       help='Max tokens per batch when --auto-batch is active (default: 25000)')
     parser.add_argument('--region', help='AWS region')
     parser.add_argument('--google-api-key', help='Google Cloud API key')
     parser.add_argument('--google-project-id', help='Google Cloud project ID')

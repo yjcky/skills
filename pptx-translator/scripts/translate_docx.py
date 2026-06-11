@@ -25,6 +25,7 @@ from translate_common import (
     LANGUAGE_NAMES,
     safe_resolve_path, setup_windows_encoding, add_common_arguments,
     build_engine_from_args,
+    token_aware_batch, estimate_tokens, estimate_prompt_overhead,
 )
 
 
@@ -538,7 +539,8 @@ def translate_document_sequential(doc, engine: TranslationEngine, source_lang: s
 # ---------------------------------------------------------------------------
 
 def translate_document(doc, engine: TranslationEngine, source_lang: str,
-                       target_lang: str, batch_mode: bool = False):
+                       target_lang: str, batch_mode: bool = False,
+                       auto_batch: bool = False, max_batch_tokens: int = 25000):
     """Translate all text in a Word document."""
 
     if batch_mode and (isinstance(engine, (BedrockLLMEngine, CerebrasEngine))):
@@ -552,12 +554,29 @@ def translate_document(doc, engine: TranslationEngine, source_lang: str,
         print(f"Found {len(text_items)} text segments")
 
         texts = [item['text'] for item in text_items]
-        batch_size = engine.batch_size
 
-        batches = []
-        for i in range(0, len(texts), batch_size):
-            batches.append(texts[i:i + batch_size])
-        batch_count = len(batches)
+        has_glossary = bool(getattr(engine, 'glossary', None))
+
+        if auto_batch:
+            batches = token_aware_batch(texts, max_tokens=max_batch_tokens,
+                                        target_lang=target_lang, has_glossary=has_glossary)
+            batch_count = len(batches)
+            # Show batch stats
+            batch_sizes = [len(b) for b in batches]
+            batch_tokens = []
+            batch_fixed = 250 + (50 if has_glossary else 0)
+            for b in batches:
+                content_tokens = sum(estimate_tokens(t, target_lang) + 8 for t in b)
+                batch_tokens.append(batch_fixed + content_tokens)
+            avg_tokens = sum(batch_tokens) // max(batch_count, 1)
+            print(f"  Auto-batched into {batch_count} batches "
+                  f"(sizes: {batch_sizes}, est. tokens avg/max: {avg_tokens}/{max(batch_tokens)})")
+        else:
+            batch_size = engine.batch_size
+            batches = []
+            for i in range(0, len(texts), batch_size):
+                batches.append(texts[i:i + batch_size])
+            batch_count = len(batches)
 
         import concurrent.futures
         import time
@@ -700,7 +719,8 @@ def main():
 
     print(f"Translating from {args.source} to {args.target}...")
     try:
-        translate_document(doc, engine, args.source, args.target, batch_mode=batch_mode)
+        translate_document(doc, engine, args.source, args.target, batch_mode=batch_mode,
+                            auto_batch=args.auto_batch, max_batch_tokens=args.max_batch_tokens)
     except RuntimeError as e:
         print(f"Error: {e}")
         sys.exit(1)

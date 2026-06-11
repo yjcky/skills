@@ -26,6 +26,7 @@ from translate_common import (
     LANGUAGE_NAMES,
     safe_resolve_path, setup_windows_encoding, add_common_arguments,
     build_engine_from_args,
+    token_aware_batch, estimate_tokens, estimate_prompt_overhead,
 )
 
 # Language code to MSO_LANGUAGE_ID mapping (pptx-specific)
@@ -283,7 +284,8 @@ def apply_paragraph_translation(para, translated_text):
 # ---------------------------------------------------------------------------
 
 def translate_presentation(presentation, engine: TranslationEngine, source_lang: str,
-                          target_lang: str, batch_mode: bool = False):
+                          target_lang: str, batch_mode: bool = False,
+                          auto_batch: bool = False, max_batch_tokens: int = 25000):
     """Translate all text in a presentation."""
 
     if batch_mode and (isinstance(engine, (BedrockLLMEngine, CerebrasEngine))):
@@ -297,17 +299,40 @@ def translate_presentation(presentation, engine: TranslationEngine, source_lang:
         print(f"Found {len(text_items)} text segments")
 
         texts = [item['text'] for item in text_items]
-        batch_size = engine.batch_size
 
-        batches = []
-        for i in range(0, len(texts), batch_size):
-            batches.append(texts[i:i + batch_size])
-        batch_count = len(batches)
+        has_glossary = bool(getattr(engine, 'glossary', None))
+
+        if auto_batch:
+            batches = token_aware_batch(texts, max_tokens=max_batch_tokens,
+                                        target_lang=target_lang, has_glossary=has_glossary)
+            batch_count = len(batches)
+            # Show batch stats
+            batch_sizes = [len(b) for b in batches]
+            batch_tokens = []
+            batch_fixed = 250 + (50 if has_glossary else 0)
+            for b in batches:
+                content_tokens = sum(estimate_tokens(t, target_lang) + 8 for t in b)
+                batch_tokens.append(batch_fixed + content_tokens)
+            avg_tokens = sum(batch_tokens) // max(batch_count, 1)
+            print(f"  Auto-batched into {batch_count} batches "
+                  f"(sizes: {batch_sizes}, est. tokens avg/max: {avg_tokens}/{max(batch_tokens)})")
+        else:
+            batch_size = engine.batch_size
+            batches = []
+            for i in range(0, len(texts), batch_size):
+                batches.append(texts[i:i + batch_size])
+            batch_count = len(batches)
 
         import concurrent.futures
         translated_texts = []
 
-        max_workers = min(3, batch_count)
+        # Cerebras rate limiting: when auto-batching, use serial (1 worker)
+        # to avoid multiple concurrent batches exceeding the TPM limit.
+        is_cerebras = isinstance(engine, CerebrasEngine)
+        if is_cerebras and auto_batch:
+            max_workers = 1
+        else:
+            max_workers = min(3, batch_count)
         print(f"Translating {batch_count} batches with {max_workers} concurrent workers...")
 
         results_by_index = {}
@@ -451,7 +476,8 @@ def main():
 
     print(f"Translating from {args.source} to {args.target}...")
     try:
-        translate_presentation(presentation, engine, args.source, args.target, batch_mode=batch_mode)
+        translate_presentation(presentation, engine, args.source, args.target, batch_mode=batch_mode,
+                               auto_batch=args.auto_batch, max_batch_tokens=args.max_batch_tokens)
     except RuntimeError as e:
         print(f"Error: {e}")
         sys.exit(1)
