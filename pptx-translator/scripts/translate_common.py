@@ -611,6 +611,7 @@ _TOKEN_DIVISOR_LATIN = 3.5    # Latin characters per token (English, etc.)
 _BATCH_FIXED_OVERHEAD = 250   # Prompt template overhead per batch (instructions, rules)
 _BATCH_GLOSSARY_OVERHEAD = 50 # Extra overhead when glossary is present
 _PER_TEXT_WRAPPER = 8         # JSON array wrapping per text (quotes, comma)
+_MAX_ITEMS_PER_BATCH = 40    # Max items per batch to prevent LLM output ordering issues
 
 
 def estimate_tokens(text: str, target_lang: str = None) -> int:
@@ -656,15 +657,18 @@ def estimate_prompt_overhead(num_texts: int, has_glossary: bool = False) -> int:
 
 
 def token_aware_batch(texts: list, max_tokens: int = 25000,
+                      max_items: int = _MAX_ITEMS_PER_BATCH,
                       target_lang: str = None, has_glossary: bool = False) -> list:
     """Group texts into batches based on estimated token counts (greedy algorithm).
 
     Each text's token count is estimated; texts are added to the current batch
-    until adding the next would exceed ``max_tokens``, then a new batch starts.
+    until adding the next would exceed ``max_tokens`` or ``max_items``, then a
+    new batch starts.
 
     Args:
         texts: List of text strings to group.
         max_tokens: Maximum estimated tokens per batch (input + output).
+        max_items: Maximum number of texts per batch (prevents LLM output misalignment).
         target_lang: Target language code (for future output-size estimation).
         has_glossary: Whether a glossary is included (adds prompt overhead).
 
@@ -686,7 +690,10 @@ def token_aware_batch(texts: list, max_tokens: int = 25000,
         is_first = len(current_batch) == 0
         extra = batch_fixed if is_first else 0
 
-        if current_tokens + text_tokens + extra > max_tokens and current_batch:
+        tokens_exceeded = current_tokens + text_tokens + extra > max_tokens
+        items_exceeded = len(current_batch) >= max_items
+
+        if (tokens_exceeded or items_exceeded) and current_batch:
             batches.append(current_batch)
             current_batch = [text]
             current_tokens = text_tokens + batch_fixed
@@ -811,6 +818,8 @@ def add_common_arguments(parser: argparse.ArgumentParser):
                        help='Enable token-aware intelligent batching (respects TPM limits)')
     parser.add_argument('--max-batch-tokens', type=int, default=25000,
                        help='Max tokens per batch when --auto-batch is active (default: 25000)')
+    parser.add_argument('--max-batch-items', type=int, default=40,
+                       help='Max texts per batch when --auto-batch is active (default: 40)')
     parser.add_argument('--region', help='AWS region')
     parser.add_argument('--google-api-key', help='Google Cloud API key')
     parser.add_argument('--google-project-id', help='Google Cloud project ID')

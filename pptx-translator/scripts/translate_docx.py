@@ -540,7 +540,8 @@ def translate_document_sequential(doc, engine: TranslationEngine, source_lang: s
 
 def translate_document(doc, engine: TranslationEngine, source_lang: str,
                        target_lang: str, batch_mode: bool = False,
-                       auto_batch: bool = False, max_batch_tokens: int = 25000):
+                       auto_batch: bool = False, max_batch_tokens: int = 25000,
+                       max_batch_items: int = 40):
     """Translate all text in a Word document."""
 
     if batch_mode and (isinstance(engine, (BedrockLLMEngine, CerebrasEngine))):
@@ -559,6 +560,7 @@ def translate_document(doc, engine: TranslationEngine, source_lang: str,
 
         if auto_batch:
             batches = token_aware_batch(texts, max_tokens=max_batch_tokens,
+                                        max_items=max_batch_items,
                                         target_lang=target_lang, has_glossary=has_glossary)
             batch_count = len(batches)
             # Show batch stats
@@ -720,7 +722,8 @@ def main():
     print(f"Translating from {args.source} to {args.target}...")
     try:
         translate_document(doc, engine, args.source, args.target, batch_mode=batch_mode,
-                            auto_batch=args.auto_batch, max_batch_tokens=args.max_batch_tokens)
+                            auto_batch=args.auto_batch, max_batch_tokens=args.max_batch_tokens,
+                            max_batch_items=args.max_batch_items)
     except RuntimeError as e:
         print(f"Error: {e}")
         sys.exit(1)
